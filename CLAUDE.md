@@ -21,9 +21,6 @@ lib crates under `crates/`, toolchain pinned in `rust-toolchain.toml`):
   commands below that refer to them are the target layout the rest of Phase 0
   creates; a command fails until the task that introduces it has landed
   (`pnpm test` and `pnpm typecheck` arrive with P0-03).
-- `.claude/` does not exist, so the `/task`, `/phase-review` and `/adr`
-  commands, the `implementer-*` subagents and the `sonnet` project default
-  described under Model routing are not set up yet.
 
 ## How work is organised
 
@@ -215,6 +212,11 @@ Rules:
 - Do not set `CLAUDE_CODE_SUBAGENT_MODEL` in this repo; it overrides the
   per-agent pins (known issue with `inherit`).
 - `/phase-review` is pinned to `best`; `/adr` to `sonnet`.
+- Claude Code has no automatic model fallback. `implementer-best` and
+  `/phase-review` pin `model: fable`; if Fable is unavailable, change both to
+  `opus`. That is the documented fallback, not a downgrade, so it needs no ADR.
+- Subagents and commands live in `.claude/agents/` and `.claude/commands/`;
+  the implementers set `disallowedTools: Agent`.
 - Project default model is `sonnet` (`.claude/settings.json`) because the
   main session mostly orchestrates. Switch with `/model opus` when you want
   to pair-program directly on engine code.
