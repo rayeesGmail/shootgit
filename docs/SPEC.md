@@ -1,6 +1,6 @@
 # Git Client — Spec, Flows & Implementation Plan
 
-Exported from the living spec (rev 20) on 2026-09-22. Edit the spec and re-export; do not hand-edit this file.
+Exported from the living spec (rev 22) on 2026-09-22. Edit the spec and re-export; do not hand-edit this file.
 
 ## 1. Overview
 
@@ -480,10 +480,34 @@ sequenceDiagram
   A->>L: GET /api/v4/user
 ```
 
-**Credential helper**
+**Credentials: SSH, HTTPS, signing (all remotes)**
 
-- `credential-helper` binary registered as `credential.https://<host>.helper` in the app's own gitconfig include, never in the user's global config without consent.
-- On `get`, returns the stored OAuth token as `password` and the login as `username`. On `erase`, no-op. One sign-in covers API and push/pull.
+The app does not build its own credential store for Git. It plugs into the machinery developers already use — `ssh` and its agents, Git's credential-helper protocol, `gpg-agent` — and adds in-app prompts and a management screen, the way IntelliJ does. Rules:
+
+1. Nothing is written to `~/.gitconfig`, `~/.ssh/config` or `known_hosts` by the app. Every hook is a per-process environment variable or `-c` flag on the `git` invocation.
+2. Secrets live only in the OS keychain (`keyring` crate), one entry per host and identity, listed and deletable in Settings → Credentials.
+3. If an agent or helper already answers, the app stays silent: zero configuration for the common case.
+4. Prompts that Git or `ssh` would print to a terminal appear as native in-app dialogs instead.
+
+| Case | Mechanism |
+| --- | --- |
+| SSH key in an agent (macOS keychain agent, `ssh-agent`, Windows OpenSSH agent, Pageant, 1Password or Bitwarden agent) | Detected via `SSH_AUTH_SOCK` or the Windows named pipe; used as is |
+| SSH key with passphrase, not loaded | `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` point at the app's helper binary; native dialog with "Remember in keychain"; on success `ssh-add` loads the key for the session |
+| Unknown or changed host key | Helper shows host + fingerprint with Accept / Reject; `ssh` writes `known_hosts` itself; changed keys are never auto-accepted |
+| No SSH key | Onboarding: Generate ed25519 key, Copy public key, and "Add to GitHub/GitLab account" via API when signed in; Test connection (`ssh -T`) |
+| `core.sshCommand` / `GIT_SSH` set by user (e.g. `plink`) | Respected; the app injects `SSH_ASKPASS` only when no custom command is configured |
+| HTTPS to a signed-in GitHub/GitLab host | `-c credential.helper=<app-helper>` per invocation supplies the OAuth token; no config include |
+| HTTPS with the user's own helper (Git Credential Manager, `osxkeychain`, `libsecret`, custom) | Left in place and consulted by Git in its normal order |
+| HTTPS with no answer | `GIT_ASKPASS` → in-app username/token dialog with "Remember in keychain" and a "Sign in with GitHub/GitLab instead" shortcut into OAuth; hosts that reject passwords never show a password field |
+| Personal access tokens (self-managed GitLab, GHES) | First-class field in Accounts and in the HTTPS dialog |
+| Two-factor auth | Satisfied by OAuth tokens; no password flows on GitHub/GitLab |
+| Commit signing | `gpg.format`, `user.signingkey`, `commit.gpgsign` honoured; GPG prompts via `gpg-agent`'s pinentry, SSH signing via the agent; signing failures shown with the exact fix |
+| Proxies, corporate CAs | `http.proxy`, `HTTPS_PROXY`, `http.sslCAInfo` passed through; TLS errors surfaced with a hint |
+| Multiple identities | Per-host keychain entries; `~/.ssh/config` host aliases work because `ssh` reads them |
+
+`credential-helper` binary: implements `get` / `store` / `erase`; on `get` returns the matching account's token as `password` and login as `username`; also serves as the `GIT_ASKPASS` and `SSH_ASKPASS` target, forwarding prompts to the running app over a local socket and falling back to a minimal native dialog if the app is not running.
+
+Settings → Credentials lists stored HTTPS credentials and passphrases per host with Remove. Settings → SSH keys lists keys in `~/.ssh` with agent-loaded status, Generate, Copy public key, Add to agent, Add to account, Test connection. Platform detection warns when the Windows OpenSSH agent service is disabled or when no agent is running on Linux.
 
 **Data path**
 
@@ -937,6 +961,7 @@ The largest risks are WebView inconsistency across three engines, Windows proces
 | 2026-09-20 | Ship 1.0 free for everyone and market it first; defer paid plans to a post-launch phase triggered by adoption | Adoption and word of mouth matter more than early revenue; pricing plan (§8) is kept ready and individuals' local Git use is intended to stay free |
 | 2026-09-22 | Commit generated IPC bindings; CI enforces freshness | Frontend typechecks without Rust; IPC changes visible in review (ADR 0003) |
 | 2026-09-22 | Low-resource operation is a Phase 0 constraint with a constrained-VM CI gate | Memory layout, threading and lazy loading cannot be retrofitted (ADR 0004; tasks P0-17, P0-18) |
+| 2026-09-22 | Credentials through existing SSH agents and Git helpers with per-process hooks; the app writes no Git or SSH config | Zero setup when an agent or helper already answers; the user's own helpers stay first; nothing to undo on uninstall (§7 Credentials; tasks P1-25, P4-13) |
 
 ## Appendix A. IntelliJ Git feature parity checklist
 

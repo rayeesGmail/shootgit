@@ -19,6 +19,7 @@ Goal: MR lifecycle on gitlab.com and a self-managed instance with the same UI as
 ## App + UI
 
 - [ ] **P5-11** Accounts settings: Sign in with GitLab (PKCE flow with "waiting for browser" state, cancel), PAT alternative, custom host; multiple accounts. · model: sonnet
+- [ ] **P5-17** GitLab SSH key onboarding: the P4-27 flow for gitlab.com and self-managed hosts — "Add to GitLab account" via `POST /user/keys` (`title`, `key`), Test connection (`ssh -T git@<host>`); shown in Onboarding and Settings → SSH keys when a GitLab account is signed in. Tests against a mock server. · model: opus
 - [ ] **P5-12** Terminology and capability adaptation: labels ("Merge request", "Approve"), hidden controls per `Capabilities`; parity checklist doc `docs/plans/forge-parity.md` filled for GitHub vs GitLab. · model: sonnet
 - [ ] **P5-13** Review mapping: internal comment positions → GitLab `position`; multi-line ranges via `line_range`; tests with a recorded MR diff. · model: sonnet
 - [ ] **P5-14** Version + build-date stamp: embedded at build (`BUILD_DATE`, semver) shown in About and included in updater manifest (§3 L0). No license code. · model: sonnet

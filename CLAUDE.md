@@ -65,8 +65,8 @@ lib crates under `crates/`, toolchain pinned in `rust-toolchain.toml`):
   a provider lacks. PR/MR data is cached in SQLite so panels render offline;
   while offline, write actions are disabled and show the reason.
 - Keychain entries are keyed `forge/<provider>/<host>/<user_id>`. The
-  credential helper is registered through the app-owned gitconfig include,
-  and only after the user consents.
+  credential helper is passed per spawn as `-c credential.helper=<path>`, only
+  for hosts with a signed-in account; no git config file is written (§7).
 
 ## Crate and package map
 
@@ -94,8 +94,10 @@ Rust
   `[workspace.lints.clippy]`; `main.rs` and each file under a crate's
   `tests/` start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
 - Public functions in `git-engine` take `&Repo` and return `Result<T, GitError>`.
-- Process spawning only via `git_engine::process::GitCommand` (handles
-  `CREATE_NO_WINDOW`, login-shell PATH on macOS, timeouts, `-z` parsing).
+- Process spawning only via `git_engine::process`: `GitCommand` for git, and
+  the generic builder it is built on for other tools (`ssh`, `ssh-add`,
+  `ssh-keygen`). Both handle `CREATE_NO_WINDOW`, login-shell PATH on macOS
+  and timeouts; `GitCommand` adds the git flags, the limiter and `-z` parsing.
 
 TypeScript
 - `strict: true`, no `any`, no non-null assertions without a comment.
@@ -135,8 +137,7 @@ Git hygiene
   operation is undoable.
 - Force push only as `--force-with-lease`; plain `--force` is behind an
   advanced setting and blocked on protected branches.
-- Never modify the user's global `~/.gitconfig`. App-specific config goes in
-  the app's own include file and only with explicit user consent.
+- Never modify the user's `~/.gitconfig`, `~/.ssh/config` or `known_hosts`. Credential hooks are per-process only: `GIT_ASKPASS`, `SSH_ASKPASS` and `-c credential.helper=...` on the spawn (§7 Credentials). Respect a user-configured `core.sshCommand`/`GIT_SSH` by not injecting anything.
 - Tokens and secrets live in the OS keychain via the `keyring` crate. Never
   in JSON, SQLite, logs, or test fixtures.
 - Byte-preserve line endings in every patch; never normalise EOL.

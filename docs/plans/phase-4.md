@@ -24,12 +24,13 @@ Goal: full PR lifecycle (create, review, merge) on github.com and a GHES-style c
 
 ## credential-helper
 
-- [ ] **P4-13** `credential-helper` binary implementing `get`/`store`/`erase` over stdin/stdout; returns keychain token for matching host; registered via app-owned gitconfig include (`credential.https://<host>.helper`) only after user consent; uninstall removes it. Tests: helper protocol round-trip; git push to a mock HTTPS remote uses it. · model: opus
+- [ ] **P4-13** `credential-helper` `get`/`store`/`erase` for forge hosts: on `get` returns the matching signed-in account's token as `password` and login as `username`; wired per invocation with `-c credential.helper=<path>` on git spawns whose remote host matches a signed-in account, so the user's own helpers (GCM, osxkeychain, libsecret) stay first in Git's order and no config file is touched. Tests: helper protocol round-trip; git push to a mock HTTPS remote succeeds with the OAuth token; a host with no account never sees the helper. · model: opus
 
 ## App + UI
 
 - [ ] **P4-14** Tauri commands: `forge_login_github`, `forge_accounts`, `forge_logout`, `forge_list_prs`, `forge_pr`, `forge_create_pr`, `forge_review`, `forge_merge`, `forge_checks`; events `forge-updated`, `forge-error`. · model: sonnet
-- [ ] **P4-15** Accounts settings: Sign in with GitHub (device-code screen: code, copy, open browser, waiting state), GHES host field, multiple accounts, sign out; credential-helper consent toggle. · model: sonnet
+- [ ] **P4-15** Accounts settings: Sign in with GitHub (device-code screen: code, copy, open browser, waiting state), GHES host field, multiple accounts, sign out. · model: sonnet
+- [ ] **P4-27** SSH key onboarding: Generate ed25519 key (passphrase optional, stored via P1-25), Copy public key, "Add to GitHub account" via `POST /user/keys`, Test connection; shown in Onboarding when no key exists and in Settings → SSH keys. GitLab equivalent (`POST /user/keys`) lands in P5-17. · model: opus
 - [ ] **P4-16** Pull Requests view: list tabs (Mine, Review requested, All), filters (state, author, label), CI dot, draft badge, stale/offline indicator, manual refresh. · model: sonnet
 - [ ] **P4-17** PR detail: description (markdown rendered), commits, checks list with links, reviewers and decision, timeline of review threads; actions: Check out, Open in browser, Copy link. · model: sonnet
 - [ ] **P4-18** Local review: on Check out, compute base..head diff locally; file list with review diff; add line/range comments (pending, stored locally in SQLite), reply in threads, resolve; Submit review (Comment / Approve / Request changes) posts batch. Map internal old/new line numbers to GitHub `line/side`. · model: opus
