@@ -82,7 +82,7 @@ As of 2026-09-22 the repo holds only `docs/`, `README.md` and this file:
 | `crates/forge-gitlab` | GitLab REST, PKCE + PAT auth. |
 | `crates/credential-helper` | Separate binary implementing `git credential`. |
 | `src-tauri` | Tauri app: commands, events, menus, settings, updater. |
-| `packages/ipc-types` | Generated TS types. Do not edit. |
+| `packages/ipc-types` | Generated TS types. Committed, never hand-edited; regenerate with `pnpm gen:types`. |
 | `packages/ui` | Solid app: `views/`, `components/`, `stores/`, `lib/`. |
 | `scripts/` | Fixture builders, release helpers. |
 
@@ -171,7 +171,11 @@ Git hygiene
 - Add telemetry that is on by default or that sends file contents, paths,
   or commit messages.
 - Introduce network calls from `git-engine`.
-- Commit generated files, fixtures' `.git` directories, or secrets.
+- Commit generated files, fixtures' `.git` directories, or secrets. One
+  exception: `packages/ipc-types/bindings.ts` IS committed, because the
+  frontend must typecheck without a Rust toolchain and IPC changes must be
+  visible in review. Never hand-edit it; run `pnpm gen:types` and commit the
+  result. CI fails if it is stale (P0-04).
 - Claim a task is complete if any test is skipped or any OS is unverified.
 
 ## Useful commands

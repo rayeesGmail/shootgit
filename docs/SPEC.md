@@ -891,6 +891,7 @@ The largest risks are WebView inconsistency across three engines, Windows proces
 | 2026-09-20 | Offline Ed25519 signed license tokens, 14-day TTL, 30-day grace | Works behind proxies; no startup network dependency |
 | 2026-09-20 | Claude Code as primary development tool with spec-driven, test-first tasks | Solo developer velocity with quality gates |
 | 2026-09-20 | Ship 1.0 free for everyone and market it first; defer paid plans to a post-launch phase triggered by adoption | Adoption and word of mouth matter more than early revenue; pricing plan (§8) is kept ready and individuals' local Git use is intended to stay free |
+| 2026-09-22 | Commit generated IPC bindings; CI enforces freshness | Frontend typechecks without Rust; IPC changes visible in review (ADR 0003) |
 
 ## Appendix A. IntelliJ Git feature parity checklist
 
