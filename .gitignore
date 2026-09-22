@@ -1,0 +1,10 @@
+# Rust
+/target/
+
+# Node / frontend
+node_modules/
+dist/
+
+# OS and editor
+.DS_Store
+.idea/
