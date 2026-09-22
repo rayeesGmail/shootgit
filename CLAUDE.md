@@ -110,8 +110,8 @@ TypeScript
 - All user-visible strings go through `t()` from `packages/ui/src/i18n/`.
 
 Git hygiene
-- Conventional Commits (`feat:`, `fix:`, `test:`, `refactor:`, `docs:`,
-  `chore:`); one logical change per commit; reference the plan task
+- Conventional Commits (`feat:`, `fix:`, `perf:`, `test:`, `refactor:`,
+  `docs:`, `chore:`); one logical change per commit; reference the plan task
   (`[P1-07]`) in the commit body.
 
 ## Testing
@@ -152,6 +152,10 @@ Git hygiene
 - Log scroll on 500k commits: 60 fps.
 - Download < 25 MB; RAM < 150 MB on a mid-size repo.
 - On Windows, minimise `git.exe` spawns: batch, cache, or use `gix`.
+- Low-end laptop (8 GB, 2 cores, slow disk) is a hard target (§4 Low-resource operation): every budget within 2×, peak RSS < 250 MB on a mid-size repo, idle CPU 0 %, no main-thread stall > 100 ms.
+- Lazy by default: nothing computes for a view that is not visible or a repo that is not active. Cancel in-flight reads when the request is superseded.
+- Bounded memory: Log rows are an LRU window, big diffs load hunk-by-hunk, blobs stream. Never hold a whole history or a whole large file in memory.
+- All `git` spawns in our code go through the shared limiter in `git_engine::process`, and all async work runs on the single runtime handed to Tauri. Do not start ad-hoc threads or spawn `git` outside those paths. Threads that libraries manage internally (notify's watcher, the WebView, SQLite) are fine. No polling timers where a watcher or event exists.
 
 ## Cross-platform (§9)
 

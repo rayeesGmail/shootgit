@@ -17,6 +17,7 @@ Goal: daily-driveable for commit workflows, with hunk- and line-level staging th
 - [ ] **P1-10** Credential error detection: classify stderr (auth failed, host key unknown, SSH agent missing, 2FA) into `RemoteError` variants with user-facing guidance strings. · model: opus
 - [ ] **P1-11** External change sync per §5 G16: index/HEAD/refs watchers trigger targeted refresh; own-write suppression validated; atomic-save (tmp + rename) coalesced. Test script `scripts/e2e/external-changes.sh` runs `git commit`, `git switch`, `git stash`, editor-style save and asserts events. · model: best
 - [ ] **P1-12** Performance: status + diff of 50k-file fixture completes < 300 ms warm; benchmark in `benches/` with criterion; CI nightly records numbers. · model: opus
+- [ ] **P1-24** Memory ceiling for Changes view: diffs over 5 MB or 50k lines load hunk-by-hunk; blob contents streamed; status entries above 500 files virtualised in the tree; CodeMirror instances pooled (max 3). Test: 5k changed files + 60k-line diff keeps RSS < 250 MB on the constrained-VM job; no main-thread stall > 100 ms measured via a frame-timing probe. · model: opus
 
 ## UI
 

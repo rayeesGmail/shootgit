@@ -17,6 +17,7 @@ Goal: a 60 fps commit graph on 500k commits with IntelliJ's commit and branch ac
 - [ ] **P2-10** SafetyPoint + Undo v1: record before reset/cherry-pick/revert/branch delete; `undo_last()` maps op type to `reset --keep` / `rebase --abort` / branch recreate; list last 10 with labels. Tests: reset then undo restores HEAD and index. · model: opus
 - [ ] **P2-11** Repo state detection: `RepoState` (clean, merging, rebasing, cherry-picking, reverting, bisecting) from `.git` markers; exposed in `RepoInfo`; updated by watcher. Tests with fixtures for each state. · model: opus
 - [ ] **P2-12** Perf: log first page < 200 ms on 500k-commit synthetic fixture; page fetch < 50 ms; bench added. · model: opus
+- [ ] **P2-24** Bounded Log memory: fixed LRU window of 20k rows, pages re-fetched from `gix` on scroll, cancelled when the viewport moves on; Log walk starts only when the view is visible and stops when hidden; inactive repos have no walker. Test: 500k-commit fixture keeps RSS growth < 60 MB while scrolling end to end on the constrained VM. · model: opus
 
 ## UI
 

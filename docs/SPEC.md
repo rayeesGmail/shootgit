@@ -1,6 +1,6 @@
 # Git Client — Spec, Flows & Implementation Plan
 
-2026-09-20 · @Someone
+Exported from the living spec (rev 20) on 2026-09-22. Edit the spec and re-export; do not hand-edit this file.
 
 ## 1. Overview
 
@@ -12,7 +12,7 @@ A standalone Git client with IntelliJ-grade Git tooling, GitHub and GitLab built
 
 1. Best Git support: every daily Git operation done in the UI, with the safety and power users expect from IntelliJ.
 2. Best UI/UX: fast, keyboard-driven, native-feeling on each OS.
-3. Small and fast: under 25 MB download, under 1 s cold start, under 150 MB RAM on a mid-size repo.
+3. Small and fast: under 25 MB download, under 1 s cold start, under 150 MB RAM on a mid-size repo, and fully usable on a low-end laptop (8 GB RAM, dual-core, HDD or slow SSD) with an IDE and browser already open.
 4. Most platforms: macOS (Intel + Apple Silicon), Windows (x64 + ARM64), Linux (x64 + ARM64) from one codebase.
 5. Sustainable business: launch free to earn adoption and word of mouth first; introduce paid plans (section 8) only after the product has proven itself.
 
@@ -26,6 +26,8 @@ A standalone Git client with IntelliJ-grade Git tooling, GitHub and GitLab built
 | Line-level stage/unstage | < 100 ms round-trip |
 | Active installs 90 days post-launch | ≥ 5,000, with ≥ 1,000 weekly active and ≥ 3,000 newsletter sign-ups |
 | Crash-free sessions | ≥ 99.5 % |
+| Idle RAM, one mid-size repo open for 10 min | < 120 MB total across all app processes |
+| Reference low-end laptop (§4 Low-resource operation) | Every P0 flow completes within 2× the budgets above; no UI freeze > 100 ms |
 
 **Out of scope for v1.0:** paid plans, licensing and billing (deferred; the plan is kept in section 8); Bitbucket, Azure DevOps, CodeCommit and Gitea providers (v1.x); mobile apps; a built-in code editor beyond diff/merge; team cloud features (shared changelists, review inbox sync).
 
@@ -122,6 +124,7 @@ Priority: P0 = must ship in v1.0, P1 = v1.x within 6 months of launch, P2 = late
 | N6 | i18n-ready from day one (string tables); ship English only in v1.0 |
 | N7 | Telemetry opt-in only; crash reports anonymized; no source code leaves the machine |
 | N8 | Signed and notarized builds; auto-update with signed manifests |
+| N9 | Low-resource operation: meets the budgets in §4 Low-resource operation on the reference low-end laptop; degrades gracefully (adaptive concurrency, lazy loading, bounded caches) instead of freezing or swapping |
 
 ## 4. Architecture
 
@@ -187,6 +190,44 @@ Commands go down, events come up. The frontend never spawns git, touches the fil
 | Changelists, shelves metadata | `.git/<app-name>/` inside each repo |
 | Tokens, license | OS keychain |
 | Logs | `app_log_dir/`, rotated, 7 days |
+
+**Low-resource operation (N9)**
+
+The app must stay pleasant on the machines many developers actually have: an 8 GB laptop with 2–4 cores, integrated graphics, a slow disk, and an IDE, browser and Docker already consuming most of the RAM. Everything below is a design constraint from Phase 0, not a Phase 6 optimisation.
+
+| Reference machine | Spec | Used for |
+| --- | --- | --- |
+| Low-end | 8 GB RAM, 2 cores / 4 threads, SATA SSD or HDD, 1366×768, Windows 10 or Ubuntu | Hard budget: all P0 flows within 2× of headline budgets |
+| Mid | 16 GB, 4–8 cores, NVMe | Headline budgets in §1 |
+| Constrained VM | 4 GB RAM, 2 vCPU (CI runner with cgroup limits) | Automated regression gate |
+
+Budgets on the low-end machine:
+
+| Metric | Budget |
+| --- | --- |
+| Cold start to Changes view (10k-file repo) | < 2 s |
+| Peak RSS, all processes, one mid-size repo | < 250 MB; < 400 MB on Linux kernel repo |
+| Idle RSS after 10 min | < 120 MB |
+| Idle CPU | 0 % (no polling timers when watcher is healthy; PR polling paused when window unfocused) |
+| Main-thread stall | never > 100 ms; all Git work off the UI thread |
+| Background threads | at most `available_parallelism() - 1`, minimum 1 |
+| Disk | forge cache ≤ 50 MB per repo, logs ≤ 10 MB, shelves user-controlled |
+| Battery | no wake-ups when idle; watcher-driven, not timer-driven |
+
+Design rules:
+
+1. **Lazy everything.** Open one view at a time; the Log walk, PR session and blame start only when their view is shown and are cancelled when hidden. No commit graph is computed for a repo nobody is looking at.
+2. **Bounded memory.** Log rows are a fixed-size LRU window (default 20k rows) with pages re-fetched from `gix`, never the whole history. Diffs over 5 MB or 50k lines load hunk-by-hunk. Blob contents are streamed, not held.
+3. **Adaptive concurrency.** A single `tokio` runtime sized from `available_parallelism()`; concurrent `git` spawns capped (2 on low-end, 4 otherwise) with a priority queue so the visible view wins.
+4. **Coalesce and cancel.** Watcher events are debounced; a new status request cancels the in-flight one; scroll-driven page fetches are cancelled when the viewport moves on.
+5. **Cheap rendering.** Canvas graph draws only visible rows; no CSS filters, shadows or animations on scroll paths; `prefers-reduced-motion` honoured; images and avatars lazy and capped at 32 px.
+6. **Multi-repo discipline.** Only the active repo has a live watcher and session; others poll HEAD every 60 s when the window is focused, never in background.
+7. **Large-repo mode.** When a repo exceeds 100k files or 1M commits, prompt once to enable `core.fsmonitor`, `core.untrackedCache`, `feature.manyFiles` and commit-graph, and switch the Log to on-demand paging with a smaller window.
+8. **WebView hygiene.** One WebView; no hidden iframes; DOM nodes in the Changes tree virtualised above 500 files; CodeMirror instances pooled and reused.
+9. **Startup diet.** Nothing but settings, the active repo's status and the last view is loaded at launch; forge sessions, updater checks and telemetry start after first paint, at low priority.
+10. **Measure on the constrained VM.** CI runs the P0 smoke flows inside a 4 GB / 2 vCPU cgroup with the synthetic large-repo fixture and fails on budget regressions > 10 %.
+
+What this rules out: Electron (baseline 300+ MB), a JVM, per-repo background indexing, eager blame or graph computation, and any always-on polling.
 
 ## 5. Git engine spec
 
@@ -358,6 +399,8 @@ flowchart TD
 - Changes view renders 5,000 changed files without virtualization lag.
 - Diff view handles 50,000-line files by windowing hunks.
 - Log canvas draws 60 fps while scrolling 500k rows; data pages fetched ahead by 3 screens.
+- Low-end laptop (§4): every budget above within 2×; no main-thread stall over 100 ms; idle CPU 0 %.
+- Virtualise any list above 500 rows; pool CodeMirror instances; no animations on scroll paths.
 
 ## 7. Hosting integrations (GitHub, GitLab)
 
@@ -866,6 +909,7 @@ The largest risks are WebView inconsistency across three engines, Windows proces
 | Code-signing cost or Azure Trusted Signing availability | Medium | Medium | Budget EV cert fallback; start signing setup in Phase 0 |
 | OAuth app approval limits or API changes | Low | Medium | Pin API versions; feature flags per provider |
 | Free competitors close the gap | Medium | Medium | Ship the four hook features first; iterate on UX weekly |
+| Unusable on low-end laptops (8 GB, slow disk) | Medium | High | Low-resource rules in §4 from Phase 0; constrained-VM CI gate; a real low-end laptop in the beta pool |
 
 **Open questions**
 
@@ -892,6 +936,7 @@ The largest risks are WebView inconsistency across three engines, Windows proces
 | 2026-09-20 | Claude Code as primary development tool with spec-driven, test-first tasks | Solo developer velocity with quality gates |
 | 2026-09-20 | Ship 1.0 free for everyone and market it first; defer paid plans to a post-launch phase triggered by adoption | Adoption and word of mouth matter more than early revenue; pricing plan (§8) is kept ready and individuals' local Git use is intended to stay free |
 | 2026-09-22 | Commit generated IPC bindings; CI enforces freshness | Frontend typechecks without Rust; IPC changes visible in review (ADR 0003) |
+| 2026-09-22 | Low-resource operation is a Phase 0 constraint with a constrained-VM CI gate | Memory layout, threading and lazy loading cannot be retrofitted (ADR 0004; tasks P0-17, P0-18) |
 
 ## Appendix A. IntelliJ Git feature parity checklist
 

@@ -9,6 +9,7 @@ Goal: full PR lifecycle (create, review, merge) on github.com and a GHES-style c
 - [ ] **P4-02** Provider detection: parse SSH/HTTPS/`ssh://` remote URLs into `RemoteIdentity`; known hosts map; probe unknown hosts (`/api/v4/version`, `/api/v3/meta`) with 3 s timeout; persisted user mapping. Tests with 20 URL shapes. · model: opus
 - [ ] **P4-03** SQLite cache (`rusqlite`, bundled): schema for repo meta, PR summaries, PR details, checks, ETags; `CacheStore` API; migration runner. Tests. · model: opus
 - [ ] **P4-04** Polling scheduler: per-repo session with window-focus and manual triggers, intervals (PR list 90 s, HEAD checks 20 s while focused), backoff on rate limit, cancellation on repo close. Tests with mocked clock. · model: opus
+- [ ] **P4-26** Idle discipline: PR polling pauses when the window is unfocused or on battery-saver; forge session starts after first paint at low priority; SQLite cache capped at 50 MB per repo with LRU eviction. Test: idle CPU 0 % over 5 min with forge connected. · model: opus
 - [ ] **P4-05** Keychain accounts: `AccountStore` over `keyring` with keys `forge/<provider>/<host>/<user_id>`; multiple accounts; account ↔ remote matching. Tests with an in-memory keyring backend. · model: opus
 
 ## forge-github
