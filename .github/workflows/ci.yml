@@ -1,0 +1,110 @@
+# CI for every pull request, every push to main, and manual runs.
+#
+# Required status check on main: "CI result". That job depends on every other
+# job here, so a new job only has to be added to its `needs:` list and the
+# branch ruleset never changes. The per-OS "Test (...)" checks are its inputs.
+#
+# Rust version: rust-toolchain.toml is the only place it is set. rustup ships
+# on every GitHub-hosted image, and `rustup toolchain install` with no argument
+# installs exactly what that file pins (channel, profile, components).
+#
+# Actions are pinned to full commit SHAs with the release tag in a trailing
+# comment; bump both together.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a PR cancels that PR's superseded run. Pushes to main and
+  # manual runs each get their own group, so every commit on main keeps a
+  # complete result.
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    # One shell on all three OSes (Git Bash on Windows).
+    shell: bash
+
+# Every job needs a literal `name:` (it is the check name), a
+# `timeout-minutes:`, and an entry in ci-result's `needs:`.
+jobs:
+  test:
+    # Named from matrix.name, not the runner label, so bumping a runner image
+    # does not rename a check.
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # Let every OS finish so a platform-only failure shows on its own.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+          - name: macOS
+            os: macos-26
+          - name: Windows
+            os: windows-2025
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # PRs restore main's cache but never save their own, so short-lived
+          # branches do not evict it from the 10 GB repository cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast
+
+  ci-result:
+    name: CI result
+    # always(): this job must report even when a needed job failed or the run
+    # was cancelled, because a skipped required check counts as passing.
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require success from every job
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "::error::A required CI job finished as '$result'."
+              exit 1
+            fi
+          done
