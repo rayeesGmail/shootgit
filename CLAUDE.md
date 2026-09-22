@@ -15,12 +15,12 @@ what a § says.
 
 ## Bootstrap status (delete this section once Phase 0 is done)
 
-As of 2026-09-22 the repo holds only `docs/`, `README.md` and this file:
-- No code exists yet. The paths, crates and commands below are the target
-  layout that Phase 0 creates, starting with P0-01. A command fails until the
-  task that introduces it has landed.
-- It is not a git repository yet. Run `git init` and add a `.gitignore`
-  (`target/`, `node_modules/`, `.DS_Store`, `.idea/`) before the first commit.
+As of 2026-09-22 only the Cargo workspace skeleton exists (P0-01: six empty
+lib crates under `crates/`, toolchain pinned in `rust-toolchain.toml`):
+- `src-tauri`, `packages/`, `scripts/` and CI do not exist yet. Paths and
+  commands below that refer to them are the target layout the rest of Phase 0
+  creates; a command fails until the task that introduces it has landed
+  (`pnpm test` and `pnpm typecheck` arrive with P0-03).
 - `.claude/` does not exist, so the `/task`, `/phase-review` and `/adr`
   commands, the `implementer-*` subagents and the `sonnet` project default
   described under Model routing are not set up yet.
@@ -93,7 +93,9 @@ Rust
   `cargo fmt` clean.
 - Errors: `thiserror` enums per crate; no `anyhow` in library crates.
 - Logging: `tracing`; never `println!` outside `git-engine-cli`.
-- No `unwrap()` / `expect()` outside tests and `main.rs`.
+- No `unwrap()` / `expect()` outside tests and `main.rs`. Enforced by
+  `[workspace.lints.clippy]`; `main.rs` and each file under a crate's
+  `tests/` start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
 - Public functions in `git-engine` take `&Repo` and return `Result<T, GitError>`.
 - Process spawning only via `git_engine::process::GitCommand` (handles
   `CREATE_NO_WINDOW`, login-shell PATH on macOS, timeouts, `-z` parsing).

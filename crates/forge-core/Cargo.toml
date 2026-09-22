@@ -1,0 +1,12 @@
+[package]
+name = "forge-core"
+description = "Forge trait, neutral models, auth traits, SQLite cache and polling scheduler shared by the hosting providers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

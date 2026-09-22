@@ -1,0 +1,13 @@
+[package]
+name = "forge-github"
+description = "GitHub REST and GraphQL client with device-flow auth."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+forge-core.workspace = true
+
+[lints]
+workspace = true

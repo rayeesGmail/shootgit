@@ -1,0 +1,13 @@
+[package]
+name = "git-engine-cli"
+description = "Dev CLI over git-engine for manual testing and debugging."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+git-engine.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+git-engine = { path = "crates/git-engine" }
+forge-core = { path = "crates/forge-core" }
+
+# Shared third-party crates. Crate-specific ones (gix, notify, rusqlite,
+# reqwest, keyring) are added here when the task that first needs them lands;
+# gix is pinned exactly (ADR 0002).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = "1.53.1"
+tracing = "0.1.44"
+
+# CLAUDE.md: no unwrap()/expect() outside tests and main.rs. clippy.toml
+# allows them in #[test] fns and #[cfg(test)] modules. main.rs and files
+# under tests/ (whose helper fns clippy does not treat as tests) start with
+# #![allow(clippy::unwrap_used, clippy::expect_used)].
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

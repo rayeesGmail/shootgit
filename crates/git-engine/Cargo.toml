@@ -1,0 +1,12 @@
+[package]
+name = "git-engine"
+description = "All local Git logic: status, diff, staging, commit, log, branches, rebase, merge, stash, shelve. Pure library with no Tauri or UI dependency."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

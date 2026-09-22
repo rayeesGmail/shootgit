@@ -1,0 +1,12 @@
+[package]
+name = "credential-helper"
+description = "Implements the git credential protocol, returning signed-in forge tokens from the OS keychain."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
