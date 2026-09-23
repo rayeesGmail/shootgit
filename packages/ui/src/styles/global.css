@@ -1,0 +1,105 @@
+/*
+ * Base tokens and reset for the bare Phase 0 window.
+ *
+ * SPEC §6: follow the OS light/dark setting, use the system UI font, compact
+ * density, no colours outside custom properties. The full platform token set
+ * (font, density, radius per OS) and the light/dark theme switch arrive with
+ * P1-13; this file only holds what one window needs.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Light palette (default). */
+  --color-surface: #fbfbfd;
+  --color-surface-raised: #ffffff;
+  --color-text: #1b1b1f;
+  --color-text-muted: #5c5f66;
+  --color-border: #d8d8de;
+
+  --font-ui:
+    system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Ubuntu,
+    Cantarell, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+
+  --font-size-body: 13px;
+  --font-size-title: 20px;
+  --line-height-body: 1.5;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-surface: #1c1c1f;
+    --color-surface-raised: #26262a;
+    --color-text: #ececf1;
+    --color-text-muted: #a0a0aa;
+    --color-border: #3a3a41;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  /* The WebView is a desktop window, not a page: no rubber-banding, no
+     accidental text selection of chrome. */
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#root {
+  height: 100%;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: var(--space-4);
+}
+
+.app__title {
+  margin: 0;
+  font-size: var(--font-size-title);
+  font-weight: 600;
+}
+
+.app__hint {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+/* SPEC §6 / §4: honour reduced motion; nothing animates on a scroll path. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

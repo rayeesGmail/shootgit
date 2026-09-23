@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+# `src-tauri` is a workspace member so `cargo fmt`, `cargo clippy` and
+# `cargo test --workspace` cover the app crate too. Building it needs the
+# platform WebView development packages (WebKitGTK 4.1 on Linux, §9).
+members = ["crates/*", "src-tauri"]
 
 [workspace.package]
 version = "0.0.0"
@@ -21,6 +24,11 @@ serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = "1.53.1"
 tracing = "0.1.44"
+
+# Tauri shell only (src-tauri). Never depended on by the library crates:
+# git-engine and the forge crates stay free of Tauri (§4).
+tauri = "2.11.6"
+tauri-build = "2.6.3"
 
 # CLAUDE.md: no unwrap()/expect() outside tests and main.rs. clippy.toml
 # allows them in #[test] fns and #[cfg(test)] modules. main.rs and files

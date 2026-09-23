@@ -1,0 +1,20 @@
+{
+  "name": "shootgit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cross-platform Git client. 'shootgit' is a placeholder name; the product name is still an open question (SPEC §12).",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter ./packages/ui run dev",
+    "build": "pnpm --filter ./packages/ui run build",
+    "tauri": "tauri",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.5"
+  }
+}

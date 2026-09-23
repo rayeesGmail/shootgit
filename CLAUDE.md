@@ -15,14 +15,16 @@ what a § says.
 
 ## Bootstrap status (delete this section once Phase 0 is done)
 
-As of 2026-09-23 only the Cargo workspace skeleton (P0-01: six empty lib
-crates under `crates/`, toolchain pinned in `rust-toolchain.toml`) and CI
-(P0-02: `.github/workflows/ci.yml`; its gate job "CI result" is the check
-to require on `main`) exist:
-- `src-tauri`, `packages/` and `scripts/` do not exist yet. Paths and
-  commands below that refer to them are the target layout the rest of Phase 0
-  creates; a command fails until the task that introduces it has landed
-  (`pnpm test` and `pnpm typecheck` arrive with P0-03).
+As of 2026-09-23 the repo has the Cargo workspace (P0-01), CI (P0-02, with
+"CI result" required on `main`) and the Tauri 2 shell with the pnpm
+workspace and `packages/ui` (P0-03):
+- Everything else in the table below is still the target layout that the rest
+  of Phase 0 builds; a command fails until the task that introduces it has
+  landed (`pnpm gen:types` and `packages/ipc-types` arrive with P0-04, the
+  git engine with P0-05 onward, `scripts/fixtures/` with P0-08).
+- The window title, `productName` and bundle identifier are placeholders
+  until the product name is decided (§12); `packages/ui/src/app-info.ts`
+  lists every place they appear.
 
 ## How work is organised
 
