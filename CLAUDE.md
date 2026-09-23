@@ -15,9 +15,11 @@ what a § says.
 
 ## Bootstrap status (delete this section once Phase 0 is done)
 
-As of 2026-09-22 only the Cargo workspace skeleton exists (P0-01: six empty
-lib crates under `crates/`, toolchain pinned in `rust-toolchain.toml`):
-- `src-tauri`, `packages/`, `scripts/` and CI do not exist yet. Paths and
+As of 2026-09-23 only the Cargo workspace skeleton (P0-01: six empty lib
+crates under `crates/`, toolchain pinned in `rust-toolchain.toml`) and CI
+(P0-02: `.github/workflows/ci.yml`; its gate job "CI result" is the check
+to require on `main`) exist:
+- `src-tauri`, `packages/` and `scripts/` do not exist yet. Paths and
   commands below that refer to them are the target layout the rest of Phase 0
   creates; a command fails until the task that introduces it has landed
   (`pnpm test` and `pnpm typecheck` arrive with P0-03).

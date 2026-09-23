@@ -5,8 +5,8 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 
 ## Tasks
 
-- [ ] **P0-01** Cargo workspace with empty lib crates: `git-engine`, `git-engine-cli`, `forge-core`, `forge-github`, `forge-gitlab`, `credential-helper`; shared `[workspace.dependencies]`; `rust-toolchain.toml`; `cargo test --workspace` passes with one trivial test per crate. · model: opus
-- [ ] **P0-02** GitHub Actions `ci.yml`: matrix (ubuntu, macos, windows) running fmt, clippy `-D warnings`, `cargo test --workspace`. Cache cargo. Required check on PRs. · model: opus
+- [x] **P0-01** Cargo workspace with empty lib crates: `git-engine`, `git-engine-cli`, `forge-core`, `forge-github`, `forge-gitlab`, `credential-helper`; shared `[workspace.dependencies]`; `rust-toolchain.toml`; `cargo test --workspace` passes with one trivial test per crate. · model: opus
+- [x] **P0-02** GitHub Actions `ci.yml`: matrix (ubuntu, macos, windows) running fmt, clippy `-D warnings`, `cargo test --workspace`. Cache cargo. Required check on PRs. · model: opus
 - [ ] **P0-03** Tauri 2 app in `src-tauri` + `packages/ui` (Solid + Vite + TypeScript strict). `pnpm tauri dev` opens a window titled with the app name on all 3 OSes. pnpm workspace at repo root. · model: opus
 - [ ] **P0-04** `specta` + `tauri-specta` wired; `pnpm gen:types` writes `packages/ipc-types/bindings.ts` (committed, never hand-edited); one sample command `ping() -> String` round-trips from UI; CI job runs `pnpm gen:types && git diff --exit-code packages/ipc-types/bindings.ts` and fails if the committed file is stale. · model: opus
 - [ ] **P0-05** `git_engine::git_binary`: resolver order (settings path → PATH git ≥ 2.30 → bundled placeholder), macOS Xcode-stub detection (`xcode-select -p` fails ⇒ skip `/usr/bin/git`), version parsing. Unit tests with fake PATH dirs per OS. · model: opus
