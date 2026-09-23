@@ -1,0 +1,10 @@
+# pnpm workspace root. Rust crates live in the Cargo workspace (Cargo.toml);
+# only JS/TS packages are listed here. `packages/ipc-types` (P0-04) will be
+# picked up by the same glob.
+packages:
+  - packages/*
+
+# pnpm 10 does not run dependency install scripts unless they are listed in
+# `onlyBuiltDependencies`. Nothing in this tree needs one today (Vite 8 bundles
+# with rolldown, whose platform binary is an optional dependency), so the list
+# is absent on purpose: add entries only with a reason.

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions the main window needs. App commands are added by the task that introduces them.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

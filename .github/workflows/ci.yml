@@ -32,6 +32,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # corepack must never stop to ask whether it may download the pnpm version
+  # pinned in package.json's "packageManager".
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: 0
 
 defaults:
   run:
@@ -74,6 +77,57 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      # `src-tauri` is a workspace member, so clippy and `cargo test
+      # --workspace` compile the Tauri app and link against the platform
+      # WebView. macOS (WKWebView) and Windows (WebView2) ship theirs; Ubuntu
+      # needs the WebKitGTK 4.1 development packages (SPEC §9). This is the
+      # dependency list from the Tauri 2 Linux prerequisites.
+      - name: Install Linux WebView build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # The frontend is checked on all three OSes in this same job rather than
+      # in a separate one: the TS tests have to pass everywhere (CLAUDE.md
+      # Testing), a separate job would need its own Node setup and could not
+      # hand `packages/ui/dist` to the cargo steps, and adding a job would mean
+      # adding a check to "CI result"'s needs.
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Enable pnpm through corepack
+        run: |
+          corepack enable pnpm
+          pnpm --version
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (TypeScript)
+        run: pnpm typecheck
+
+      - name: Test (frontend)
+        run: pnpm test
+
+      # Produces packages/ui/dist, which tauri.conf.json's `frontendDist`
+      # points at. A debug build resolves the frontend from `devUrl` and does
+      # not need it, but building it here keeps the production path honest and
+      # checks the Vite build on every OS.
+      - name: Build frontend
+        run: pnpm build
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

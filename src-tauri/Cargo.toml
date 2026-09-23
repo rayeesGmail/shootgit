@@ -1,0 +1,26 @@
+[package]
+name = "app"
+description = "Tauri shell: window, commands, events, menus, settings and updater."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# The binary stays a thin wrapper around this library so the startup path can be
+# exercised from tests and, later, by the bindings generator (P0-04).
+name = "app_lib"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+tauri = { workspace = true }
+
+[dev-dependencies]
+# Reading tauri.conf.json in tests the way Tauri reads it.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
