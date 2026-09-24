@@ -92,6 +92,14 @@ body {
   color: var(--color-text-muted);
 }
 
+/* Whether the Rust side answered `ping` (P0-04). P0-12 replaces it with the
+   real repository state. */
+.app__status {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+}
+
 /* SPEC §6 / §4: honour reduced motion; nothing animates on a scroll path. */
 @media (prefers-reduced-motion: reduce) {
   *,
