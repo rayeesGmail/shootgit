@@ -7,6 +7,14 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+thiserror = { workspace = true }
+# `process` and `time`: child processes with a timeout, only in `src/process.rs`.
+tokio = { workspace = true, features = ["process", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Tests drive the async API on a current-thread runtime.
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true
