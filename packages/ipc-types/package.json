@@ -1,0 +1,24 @@
+{
+  "name": "@shootgit/ipc-types",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generated TypeScript bindings for every Tauri command (SPEC §4 IPC contract). Produced by `pnpm gen:types`; never hand-edited (ADR 0003).",
+  "main": "./bindings.ts",
+  "types": "./bindings.ts",
+  "exports": {
+    ".": {
+      "types": "./bindings.ts",
+      "default": "./bindings.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

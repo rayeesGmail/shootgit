@@ -8,7 +8,7 @@ publish.workspace = true
 
 [lib]
 # The binary stays a thin wrapper around this library so the startup path can be
-# exercised from tests and, later, by the bindings generator (P0-04).
+# exercised from tests and by the bindings generator (`src/bin/gen-types.rs`).
 name = "app_lib"
 path = "src/lib.rs"
 
@@ -16,11 +16,18 @@ path = "src/lib.rs"
 tauri-build = { workspace = true }
 
 [dependencies]
+specta = { workspace = true }
+specta-typescript = { workspace = true }
 tauri = { workspace = true }
+tauri-specta = { workspace = true }
 
 [dev-dependencies]
 # Reading tauri.conf.json in tests the way Tauri reads it.
 serde_json = { workspace = true }
+# `tauri::test` (mock runtime, `get_ipc_response`) drives commands over the real
+# IPC bridge without a window. Feature unification keeps this out of the app.
+tauri = { workspace = true, features = ["test"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

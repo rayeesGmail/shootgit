@@ -142,12 +142,88 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
 
+  # `packages/ipc-types/bindings.ts` is generated from the Rust command
+  # signatures and committed, so the frontend typechecks without a Rust
+  # toolchain and IPC changes are visible in review (ADR 0003). This job is the
+  # enforcement: regenerate, then fail if the committed copy differs.
+  #
+  # One OS is enough. The generator writes LF everywhere and `.gitattributes`
+  # pins the checkout to LF, and `src-tauri/tests/bindings.rs` re-checks the
+  # same thing inside `cargo test` on all three OSes. What this job adds on top
+  # is the `pnpm gen:types` script itself — its cargo invocation and the path
+  # it resolves — which no Rust test can cover.
+  bindings:
+    name: IPC bindings
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install --no-self-update
+
+      # `gen-types` links against the app crate, which links the platform
+      # WebView (SPEC §9); on Linux that means WebKitGTK 4.1.
+      - name: Install Linux WebView build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Enable pnpm through corepack
+        run: corepack enable pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # No `pnpm build` step: a debug build resolves the frontend from
+      # `devUrl`, so `generate_context!` never reads `packages/ui/dist`. If
+      # that ever changes, tauri-codegen says so by name and this step fails.
+      - name: Regenerate the IPC bindings
+        run: pnpm gen:types
+
+      - name: Fail if the committed bindings are stale
+        run: |
+          # `git diff` is blind to an untracked file, so a bindings.ts that was
+          # never committed (or was added to .gitignore) would pass the diff
+          # below without anyone noticing. Check it is tracked first.
+          git ls-files --error-unmatch packages/ipc-types/bindings.ts >/dev/null
+          if git diff --exit-code packages/ipc-types/bindings.ts; then
+            exit 0
+          fi
+          msg="The committed IPC bindings do not match the Rust command"
+          msg="$msg signatures. Run 'pnpm gen:types' and commit the result"
+          msg="$msg (ADR 0003). The diff above is what is missing."
+          echo "::error file=packages/ipc-types/bindings.ts::$msg"
+          exit 1
+
   ci-result:
     name: CI result
     # always(): this job must report even when a needed job failed or the run
     # was cancelled, because a skipped required check counts as passing.
     if: always()
-    needs: [test]
+    needs: [test, bindings]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

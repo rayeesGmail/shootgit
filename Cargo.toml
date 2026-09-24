@@ -30,6 +30,17 @@ tracing = "0.1.44"
 tauri = "2.11.6"
 tauri-build = "2.6.3"
 
+# IPC type generation (§4 IPC contract, ADR 0003; pinned per ADR 0005).
+# specta 2 and tauri-specta 2 are release candidates whose own docs require an
+# exact `=` pin, because an rc bump is allowed to break the API; the three move
+# together, so bump them together and re-run `pnpm gen:types`.
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+specta-typescript = "0.0.12"
+tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript"] }
+
+# Test-only helpers.
+tempfile = "3.27.0"
+
 # CLAUDE.md: no unwrap()/expect() outside tests and main.rs. clippy.toml
 # allows them in #[test] fns and #[cfg(test)] modules. main.rs and files
 # under tests/ (whose helper fns clippy does not treat as tests) start with
