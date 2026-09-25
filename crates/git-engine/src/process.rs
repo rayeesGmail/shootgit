@@ -16,14 +16,21 @@
 //!
 //! [`split_nul`] splits `-z` output into fields.
 //!
+//! Every `GitCommand` takes a slot from the shared [`Limiter`] before it
+//! spawns and holds it until git has exited (§4 Low-resource operation): at
+//! most 2 or 4 git processes at once, visible-view work ahead of background
+//! work. See `limiter`.
+//!
 //! A timeout kills the child together with every process it started (a
 //! process group on Unix, a Job Object on Windows; see `tree`). So does
-//! dropping an `output()` future before it finishes, so cancelling a read
-//! also stops its processes.
+//! cancelling the command's [`CancellationToken`], which also returns it at
+//! once from the limiter's queue, and so does dropping an `output()` future
+//! before it finishes.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -31,7 +38,13 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::GitError;
 
+mod limiter;
 mod tree;
+
+pub use limiter::{cap_for, Cancelled, Limiter, Permit, Priority};
+/// The token every read is cancelled through; re-exported so callers do not
+/// depend on `tokio-util` themselves.
+pub use tokio_util::sync::CancellationToken;
 
 /// Timeout applied when the caller does not choose one.
 ///
@@ -61,6 +74,23 @@ pub fn login_shell_path() -> Option<&'static OsStr> {
     LOGIN_SHELL_PATH.get().map(OsString::as_os_str)
 }
 
+/// Processes this module has started since the program began.
+static SPAWNS: AtomicU64 = AtomicU64::new(0);
+/// Of those, `git` invocations.
+static GIT_SPAWNS: AtomicU64 = AtomicU64::new(0);
+
+/// How many processes this module has spawned so far, git and other tools.
+pub fn spawn_count() -> u64 {
+    SPAWNS.load(Ordering::Relaxed)
+}
+
+/// How many `git` processes this module has spawned so far. The perf harness
+/// records it per operation, because on Windows every spawn is expensive
+/// (§1, §4).
+pub fn git_spawn_count() -> u64 {
+    GIT_SPAWNS.load(Ordering::Relaxed)
+}
+
 /// Why a process could not be run to completion.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -79,6 +109,16 @@ pub enum ProcessError {
     },
     #[error("{program:?} did not finish within {timeout:?} and was killed")]
     Timeout { program: PathBuf, timeout: Duration },
+    /// The command's [`CancellationToken`] fired. If the process had been
+    /// started, it was killed together with everything it started.
+    #[error("{program:?} was cancelled")]
+    Cancelled { program: PathBuf },
+}
+
+/// Why `output()` stopped waiting for its child.
+enum Stop {
+    Timeout(Duration),
+    Cancelled,
 }
 
 /// What a finished process produced.
@@ -110,6 +150,9 @@ pub struct ProcessCommand {
     envs: Vec<(OsString, OsString)>,
     current_dir: Option<PathBuf>,
     timeout: Option<Duration>,
+    cancel: Option<CancellationToken>,
+    /// Set by `GitCommand`, for [`git_spawn_count`].
+    counts_as_git: bool,
 }
 
 impl ProcessCommand {
@@ -122,6 +165,8 @@ impl ProcessCommand {
             envs: Vec::new(),
             current_dir: None,
             timeout: Some(DEFAULT_TIMEOUT),
+            cancel: None,
+            counts_as_git: false,
         }
     }
 
@@ -165,6 +210,15 @@ impl ProcessCommand {
         self
     }
 
+    /// Stops the command when `token` is cancelled. Before the spawn nothing
+    /// is started; once running, the process and everything it started are
+    /// killed. [`output`](Self::output) then returns
+    /// [`ProcessError::Cancelled`].
+    pub fn cancel_token(&mut self, token: CancellationToken) -> &mut Self {
+        self.cancel = Some(token);
+        self
+    }
+
     fn build(&self) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.program);
         command
@@ -191,12 +245,27 @@ impl ProcessCommand {
     /// Runs the command to completion and returns what it printed.
     ///
     /// A non-zero exit is not an error here; see [`ProcessOutput::success`].
+    /// The timeout starts at the spawn.
     pub async fn output(&self) -> Result<ProcessOutput, ProcessError> {
+        let cancelled = || ProcessError::Cancelled {
+            program: self.program.clone(),
+        };
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(cancelled());
+        }
         let started = Instant::now();
         let mut child = self.build().spawn().map_err(|source| ProcessError::Spawn {
             program: self.program.clone(),
             source,
         })?;
+        SPAWNS.fetch_add(1, Ordering::Relaxed);
+        if self.counts_as_git {
+            GIT_SPAWNS.fetch_add(1, Ordering::Relaxed);
+        }
         // Declared after `child` so it drops first: on cancellation the tree
         // is killed while the leader is still unreaped.
         let mut tree = tree::ProcessTree::attach(&child);
@@ -215,24 +284,49 @@ impl ProcessCommand {
                 stderr,
             })
         };
-
-        let result = match self.timeout {
-            None => run.await,
-            Some(timeout) => match tokio::time::timeout(timeout, run).await {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    // The tree first, while git is unreaped (see `tree`).
-                    tree.kill();
-                    if let Err(error) = child.kill().await {
-                        tracing::warn!(program = ?self.program, %error, "could not kill timed-out process");
-                    }
-                    tracing::warn!(program = ?self.program, ?timeout, "process timed out");
-                    return Err(ProcessError::Timeout {
-                        program: self.program.clone(),
-                        timeout,
-                    });
-                }
+        let bounded = async {
+            match self.timeout {
+                None => Ok(run.await),
+                Some(timeout) => tokio::time::timeout(timeout, run)
+                    .await
+                    .map_err(|_elapsed| Stop::Timeout(timeout)),
+            }
+        };
+        let outcome = match &self.cancel {
+            None => bounded.await,
+            Some(token) => tokio::select! {
+                biased;
+                () = token.cancelled() => Err(Stop::Cancelled),
+                outcome = bounded => outcome,
             },
+        };
+
+        let result = match outcome {
+            Ok(result) => result,
+            Err(Stop::Timeout(timeout)) => {
+                // The tree first, while git is unreaped (see `tree`).
+                tree.kill();
+                if let Err(error) = child.kill().await {
+                    tracing::warn!(program = ?self.program, %error, "could not kill timed-out process");
+                }
+                tracing::warn!(program = ?self.program, ?timeout, "process timed out");
+                return Err(ProcessError::Timeout {
+                    program: self.program.clone(),
+                    timeout,
+                });
+            }
+            Err(Stop::Cancelled) => {
+                // The tree first, as above. No wait for the leader to be
+                // reaped: cancellation is on the interactive path (a
+                // superseded status read), and tokio reaps the child when
+                // `child` drops, as it does when the future is dropped.
+                tree.kill();
+                if let Err(error) = child.start_kill() {
+                    tracing::debug!(program = ?self.program, %error, "cancelled process was already gone");
+                }
+                tracing::debug!(program = ?self.program, "process cancelled");
+                return Err(cancelled());
+            }
         };
 
         // On an I/O error the tree stays armed and is killed on return.
@@ -267,6 +361,12 @@ async fn read_pipe<R: AsyncRead + Unpin>(pipe: Option<&mut R>) -> std::io::Resul
 /// `git --no-optional-locks -c core.quotepath=off [-c key=value]... <args>`
 /// with `GIT_TERMINAL_PROMPT=0`, so git never blocks on a terminal prompt.
 ///
+/// Every run takes a slot from the shared [`Limiter`] (or the one given to
+/// [`limiter`](Self::limiter)) in the lane chosen by
+/// [`priority`](Self::priority), and can be cancelled through
+/// [`cancel_token`](Self::cancel_token) whether it is still queued or already
+/// running.
+///
 /// Injection points reserved for later tasks:
 /// - [`config`](Self::config): the per-spawn `-c` list, e.g.
 ///   `credential.helper=<path>` for hosts with a signed-in account (P4-13).
@@ -278,6 +378,9 @@ pub struct GitCommand {
     process: ProcessCommand,
     config: Vec<OsString>,
     args: Vec<OsString>,
+    priority: Priority,
+    /// `None` means [`Limiter::shared`].
+    limiter: Option<Limiter>,
 }
 
 /// Flags every git spawn gets, before any per-spawn `-c`.
@@ -291,6 +394,8 @@ impl GitCommand {
             process: ProcessCommand::new(git),
             config: Vec::new(),
             args: Vec::new(),
+            priority: Priority::default(),
+            limiter: None,
         }
     }
 
@@ -341,9 +446,32 @@ impl GitCommand {
         self
     }
 
-    /// See [`ProcessCommand::timeout`].
+    /// See [`ProcessCommand::timeout`]. The timeout starts once the command
+    /// has its slot and is spawned, not while it queues.
     pub fn timeout(&mut self, timeout: Option<Duration>) -> &mut Self {
         self.process.timeout(timeout);
+        self
+    }
+
+    /// Which lane this run waits in when the limiter is full. Defaults to
+    /// [`Priority::Visible`]; see [`Priority`] for the choice.
+    pub fn priority(&mut self, priority: Priority) -> &mut Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Cancels the run when `token` fires: queued, it leaves the queue
+    /// without spawning; running, git and everything it started are killed.
+    /// [`output`](Self::output) then returns [`GitError::Cancelled`].
+    pub fn cancel_token(&mut self, token: CancellationToken) -> &mut Self {
+        self.process.cancel_token(token);
+        self
+    }
+
+    /// Takes the slot from `limiter` instead of [`Limiter::shared`], for
+    /// tests and tools that need a cap of their own.
+    pub fn limiter(&mut self, limiter: Limiter) -> &mut Self {
+        self.limiter = Some(limiter);
         self
     }
 
@@ -363,6 +491,7 @@ impl GitCommand {
         process
             .args(self.full_args())
             .env("GIT_TERMINAL_PROMPT", "0");
+        process.counts_as_git = true;
         process
     }
 
@@ -388,8 +517,28 @@ impl GitCommand {
     /// whose exit code carries an answer (`merge-base --is-ancestor`,
     /// `diff --exit-code`).
     pub async fn output_unchecked(&self) -> Result<ProcessOutput, GitError> {
-        // P0-17: acquire the shared git concurrency limiter here.
-        Ok(self.process().output().await?)
+        let limiter = match &self.limiter {
+            Some(own) => own,
+            None => Limiter::shared(),
+        };
+        let never;
+        let cancel = match &self.process.cancel {
+            Some(token) => token,
+            None => {
+                never = CancellationToken::new();
+                &never
+            }
+        };
+        // Held until git has exited: the slot bounds processes, not spawns.
+        let _slot = limiter
+            .acquire(self.priority, cancel)
+            .await
+            .map_err(|Cancelled| GitError::Cancelled)?;
+        match self.process().output().await {
+            Ok(output) => Ok(output),
+            Err(ProcessError::Cancelled { .. }) => Err(GitError::Cancelled),
+            Err(other) => Err(other.into()),
+        }
     }
 }
 
@@ -770,6 +919,77 @@ mod tests {
         });
 
         assert!(outcome.is_err(), "git finished instead of being cancelled");
+        let pid = recorded_pid(&pid_file);
+        assert!(pid_goes_away(pid), "sleep {pid} survived cancellation");
+    }
+
+    #[test]
+    fn git_command_counts_exactly_one_spawn_per_run() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let git_before = git_spawn_count();
+        let total_before = spawn_count();
+        let mut git = GitCommand::new(machine_git());
+        git.arg("--version");
+
+        block_on(git.output()).unwrap();
+
+        assert_eq!(git_spawn_count(), git_before + 1);
+        assert_eq!(spawn_count(), total_before + 1);
+        assert_eq!(Limiter::shared().in_flight(), 0, "the slot was returned");
+    }
+
+    #[test]
+    fn git_command_with_a_cancelled_token_is_never_spawned() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut git = GitCommand::new(machine_git());
+        git.arg("--version").cancel_token(token);
+        let before = git_spawn_count();
+
+        let err = block_on(git.output()).unwrap_err();
+
+        assert!(matches!(err, GitError::Cancelled), "{err:?}");
+        assert_eq!(git_spawn_count(), before);
+    }
+
+    #[test]
+    fn process_with_a_cancelled_token_is_never_spawned() {
+        // The program does not exist: a spawn attempt would fail with
+        // `Spawn`, not `Cancelled`.
+        let dir = tempfile::tempdir().unwrap();
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut command = ProcessCommand::new(dir.path().join("no-such-program"));
+        command.cancel_token(token);
+        let before = spawn_count();
+
+        let err = block_on(command.output()).unwrap_err();
+
+        assert!(matches!(err, ProcessError::Cancelled { .. }), "{err:?}");
+        assert_eq!(spawn_count(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_the_token_kills_the_grandchild() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("sleep.pid");
+        let token = CancellationToken::new();
+        let mut git = git_with_background_sleep(dir.path(), &pid_file);
+        git.timeout(None).cancel_token(token.clone());
+
+        let err = block_on(async {
+            let cancel = async {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                token.cancel();
+            };
+            let (result, ()) = tokio::join!(git.output(), cancel);
+            result.unwrap_err()
+        });
+
+        assert!(matches!(err, GitError::Cancelled), "{err:?}");
         let pid = recorded_pid(&pid_file);
         assert!(pid_goes_away(pid), "sleep {pid} survived cancellation");
     }

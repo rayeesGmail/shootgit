@@ -3,6 +3,7 @@
 pub mod error;
 pub mod git_binary;
 pub mod process;
+pub mod runtime;
 
 #[cfg(test)]
 pub(crate) mod test_support {

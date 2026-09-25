@@ -57,6 +57,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.0.0"
 dependencies = [
+ "git-engine",
  "serde_json",
  "specta",
  "specta-typescript",
@@ -1139,6 +1140,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -2243,6 +2245,20 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "perf-harness"
+version = "0.0.0"
+dependencies = [
+ "git-engine",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "phf"

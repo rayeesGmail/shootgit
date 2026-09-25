@@ -15,6 +15,7 @@ publish = false
 # Internal crates
 git-engine = { path = "crates/git-engine" }
 forge-core = { path = "crates/forge-core" }
+perf-harness = { path = "crates/perf-harness" }
 
 # Shared third-party crates. Crate-specific ones (gix, notify, rusqlite,
 # reqwest, keyring) are added here when the task that first needs them lands;
@@ -23,6 +24,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = "1.53.1"
+# `CancellationToken` for cancellable reads (§4 Low-resource operation).
+# Already in Cargo.lock through tauri.
+tokio-util = "0.7.19"
 tracing = "0.1.44"
 
 # Platform FFI for killing a spawned process tree (git_engine::process).

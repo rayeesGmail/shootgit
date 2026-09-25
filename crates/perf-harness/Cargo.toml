@@ -1,24 +1,16 @@
 [package]
-name = "git-engine"
-description = "All local Git logic: status, diff, staging, commit, log, branches, rebase, merge, stash, shelve. Pure library with no Tauri or UI dependency."
+name = "perf-harness"
+description = "Records RSS, git spawn count and wall time per named operation to JSON, for the constrained-VM perf gate (SPEC §4 Low-resource operation)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+git-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = [
-    "io-util",
-    "macros",
-    "process",
-    "rt",
-    "rt-multi-thread",
-    "sync",
-    "time",
-] }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
@@ -26,13 +18,13 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_JobObjects",
+    "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [lints]
 workspace = true

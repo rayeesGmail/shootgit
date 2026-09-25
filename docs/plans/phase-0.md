@@ -11,7 +11,7 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 - [x] **P0-04** `specta` + `tauri-specta` wired; `pnpm gen:types` writes `packages/ipc-types/bindings.ts` (committed, never hand-edited); one sample command `ping() -> String` round-trips from UI; CI job runs `pnpm gen:types && git diff --exit-code packages/ipc-types/bindings.ts` and fails if the committed file is stale. · model: opus
 - [x] **P0-05** `git_engine::git_binary`: resolver order (settings path → PATH git ≥ 2.30 → bundled placeholder), macOS Xcode-stub detection (`xcode-select -p` fails ⇒ skip `/usr/bin/git`), version parsing. Unit tests with fake PATH dirs per OS. · model: opus
 - [x] **P0-06** `git_engine::process::GitCommand`: builder over `tokio::process`, always passes `--no-optional-locks -c core.quotepath=off`, sets `CREATE_NO_WINDOW` on Windows, `GIT_TERMINAL_PROMPT=0`, timeout, captures stdout/stderr as bytes, `-z` split helper. Tests: timeout fires; NUL split handles empty fields; exit code mapping to `GitError`. Reserve env-injection points for `GIT_ASKPASS`/`SSH_ASKPASS` and a per-spawn `-c` list (used by P1-25 and P4-13). Build it on a generic process builder in the same module (`CREATE_NO_WINDOW`, login-shell PATH, timeout, byte capture) that non-git tools reuse (`ssh`, `ssh-add`, `ssh-keygen` in P1-25, P1-26, P4-27). · model: opus
-- [ ] **P0-17** Low-resource runtime and limiter (§4 Low-resource operation): build one tokio runtime sized `max(1, available_parallelism() - 1)` worker threads and hand it to Tauri via `tauri::async_runtime::set(runtime.handle().clone())` before `tauri::Builder::default()` so the app has a single runtime; `GitCommand` goes through a shared concurrency limiter (semaphore of 2 when available_parallelism() ≤ 4, else 4) with two priority lanes (visible-view work before background work); every read accepts a `CancellationToken` and stops promptly when cancelled; `perf/` harness (`crates/perf-harness` or `scripts/perf/`) records RSS, git spawn count and wall time per named operation to JSON. Tests: limiter never exceeds its cap under 50 concurrent requests; high-priority request completes before queued low-priority ones; cancelled read returns within 50 ms. · model: best
+- [x] **P0-17** Low-resource runtime and limiter (§4 Low-resource operation): build one tokio runtime sized `max(1, available_parallelism() - 1)` worker threads and hand it to Tauri via `tauri::async_runtime::set(runtime.handle().clone())` before `tauri::Builder::default()` so the app has a single runtime; `GitCommand` goes through a shared concurrency limiter (semaphore of 2 when available_parallelism() ≤ 4, else 4) with two priority lanes (visible-view work before background work); every read accepts a `CancellationToken` and stops promptly when cancelled; `perf/` harness (`crates/perf-harness` or `scripts/perf/`) records RSS, git spawn count and wall time per named operation to JSON. Tests: limiter never exceeds its cap under 50 concurrent requests; high-priority request completes before queued low-priority ones; cancelled read returns within 50 ms. · model: best
 - [ ] **P0-07** macOS login-shell environment: resolve `PATH` once via the user's shell (`$SHELL -ilc 'echo $PATH'`) with a 2 s timeout and fallback; used by `GitCommand`. Test on macOS runner. · model: opus
 - [ ] **P0-08** `git_engine::status`: run `git status --porcelain=v2 -z --branch --untracked-files=all` and parse into `RepoInfo` + `Vec<StatusEntry>` (ordinary, renamed/copied, unmerged, untracked, ignored). Fixture script `scripts/fixtures/basic.sh` creates a repo with each entry kind. Tests for all kinds incl. rename with spaces and unicode path. · model: opus
 - [ ] **P0-09** `RepoActor`: tokio task per repo owning `Repo` handle, mailbox for commands, serialises writes, concurrent reads. `open_repo(path)` discovers `.git` (incl. worktree `.git` file). Test: two concurrent reads, one write, ordering preserved. · model: opus
@@ -70,9 +70,10 @@ close it. When that task starts, move the item into its scope and delete it here
   (§9) has no plan task yet. Add one to the packaging work.
 - From P0-05 and P0-06: `git_binary::run()` still spawns with synchronous
   `std::process` instead of going through `git_engine::process`, so
-  `git --version` and `xcode-select -p` have no timeout. Needs a sync entry
-  point on `ProcessCommand`, or async binary resolution. Owner: P0-07 (it
-  touches the same spawn path).
+  `git --version` and `xcode-select -p` have no timeout. Since P0-17 these
+  probes also skip the shared limiter and the git spawn counter. Needs a sync
+  entry point on `ProcessCommand`, or async binary resolution. Owner: P0-07
+  (it touches the same spawn path).
 - From P0-06: `ProcessCommand` cannot write to the child's stdin. Needed to
   feed patches to `git apply` and for the credential protocol. Owner: P1-04.
 - From P0-06: an inherited `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_WORK_TREE` (the
@@ -90,8 +91,17 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-06: on Windows, a process that git starts between spawn and
   `AssignProcessToJobObject` escapes the Job Object and survives a tree kill
   (documented in `process/tree.rs`). Revisit if a leaked child ever shows up,
-  e.g. by spawning suspended. Owner: P0-17 (cancellation).
+  e.g. by spawning suspended. P0-17 left it open: the fix is Windows-only and
+  could not be checked on macOS. Owner: unassigned; give it to a task whose
+  work is verified on Windows.
 - From P0-06: children run in their own process group on Unix, so one that
   reads `/dev/tty` (ssh asking for a passphrase) is stopped by SIGTTIN instead
   of prompting in `git-engine-cli`. The GUI is unaffected. Owner: P1-25 (askpass
   replaces terminal prompts); until then the CLI cannot answer prompts.
+- From P0-17: `perf-harness` records this process's peak RSS, plus the
+  largest single child's peak on Unix (`None` on Windows). The spec's "peak
+  RSS, all processes" may need the sum across git children. Owner: P0-18.
+- From P0-17: the runtime caps worker threads at `max(1, cores - 1)` but
+  leaves tokio's blocking pool at its default (up to 512 threads on demand).
+  Nothing uses it yet. Decide whether the spec's thread budget covers it and
+  record the answer with `/adr`.
