@@ -87,3 +87,11 @@ close it. When that task starts, move the item into its scope and delete it here
   classified. Owner: P1-10.
 - From P0-06: `DEFAULT_TIMEOUT` is 60 s and the spec gives no value. Confirm
   or change it, and record the choice in the spec.
+- From P0-06: on Windows, a process that git starts between spawn and
+  `AssignProcessToJobObject` escapes the Job Object and survives a tree kill
+  (documented in `process/tree.rs`). Revisit if a leaked child ever shows up,
+  e.g. by spawning suspended. Owner: P0-17 (cancellation).
+- From P0-06: children run in their own process group on Unix, so one that
+  reads `/dev/tty` (ssh asking for a passphrase) is stopped by SIGTTIN instead
+  of prompting in `git-engine-cli`. The GUI is unaffected. Owner: P1-25 (askpass
+  replaces terminal prompts); until then the CLI cannot answer prompts.
