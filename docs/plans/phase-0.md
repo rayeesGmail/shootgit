@@ -36,10 +36,43 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 Gaps found while reviewing finished tasks. Each one names the task that should
 close it. When that task starts, move the item into its scope and delete it here.
 
-- From P0-06: `git_binary::run()` still spawns with synchronous
-  `std::process` instead of going through `git_engine::process`. Needs a sync
-  entry point on `ProcessCommand`, or async binary resolution. Owner: P0-07
-  (it touches the same spawn path).
+- From P0-02: `.gitattributes` protects only `bindings.ts`. Windows runners
+  check files out as CRLF, which will break the byte-exact fixture and golden
+  patch tests. Add `-text` or `eol` rules for `tests/golden/` and the fixture
+  inputs. Owner: P0-15, and it must land before P0-08 and P1-01.
+- From P0-02: Dependabot, `cargo audit` and `npm audit` (spec "Dependency
+  audit") have no plan task. Add one.
+- From P0-02: the workflows are not linted. Run `actionlint` on `ci.yml`
+  and on the new `release.yml`. Owner: P0-14.
+- From P0-03: CI caches cargo but not the pnpm store. Owner: P0-18 (CI cache
+  work), or any later CI change.
+- From P0-03: the shell's English UI strings bypass `t()`. Owner: P6-20.
+- From P0-03: `README.md` has no build instructions. Owner: P0-15.
+- From P0-03: the CSP keeps `style-src 'unsafe-inline'`
+  (`src-tauri/tauri.conf.json`) for CodeMirror. Once the diff editor lands in
+  Phase 1, check whether it can be dropped.
+- From P0-04: ADR 0005 (exact pin of the specta rc crates) has no row in the
+  spec's §12 Decisions log. Add it in the Claude Doc and re-export; never
+  hand-edit `SPEC.md`.
+- From P0-05: an unusable git path in settings (missing, not executable, too
+  old, or the Xcode stub) is a hard error, not a fallback to PATH. §5 does
+  not say which is right. Confirm it and record it with `/adr`.
+- From P0-05: the 2.30 minimum is enforced on the settings and bundled
+  sources too, though §5 attaches it only to PATH (CLAUDE.md makes 2.30 the
+  overall minimum). Confirm it in the same ADR.
+- From P0-05: `ResolveOptions::from_env` reads this process's `PATH`. On
+  macOS the caller must overwrite `search_path` with the login-shell PATH.
+  Owner: P0-07.
+- From P0-05: the Xcode-stub check compares paths exactly and does not
+  resolve symlinks, so `/usr/bin/git` reached through a symlink is not
+  recognised as the stub. Owner: P0-07.
+- From P0-05: `bundled_git_path()` is always `None`. Shipping a bundled git
+  (§9) has no plan task yet. Add one to the packaging work.
+- From P0-05 and P0-06: `git_binary::run()` still spawns with synchronous
+  `std::process` instead of going through `git_engine::process`, so
+  `git --version` and `xcode-select -p` have no timeout. Needs a sync entry
+  point on `ProcessCommand`, or async binary resolution. Owner: P0-07 (it
+  touches the same spawn path).
 - From P0-06: a timeout or cancellation kills only git, not processes git
   started (`sh`, `ssh`). Kill the whole tree (a process group on Unix, a Job
   Object on Windows). Owner: P0-17 (a cancelled read must stop promptly).
