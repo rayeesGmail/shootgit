@@ -1135,10 +1135,12 @@ dependencies = [
 name = "git-engine"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

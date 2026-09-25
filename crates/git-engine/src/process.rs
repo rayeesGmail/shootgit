@@ -16,8 +16,10 @@
 //!
 //! [`split_nul`] splits `-z` output into fields.
 //!
-//! Dropping an `output()` future before it finishes kills the child
-//! (`kill_on_drop`), so cancelling a read also stops its process.
+//! A timeout kills the child together with every process it started (a
+//! process group on Unix, a Job Object on Windows; see `tree`). So does
+//! dropping an `output()` future before it finishes, so cancelling a read
+//! also stops its processes.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -28,6 +30,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::GitError;
+
+mod tree;
 
 /// Timeout applied when the caller does not choose one.
 ///
@@ -180,6 +184,7 @@ impl ProcessCommand {
         }
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
+        tree::configure(&mut command);
         command
     }
 
@@ -192,6 +197,9 @@ impl ProcessCommand {
             program: self.program.clone(),
             source,
         })?;
+        // Declared after `child` so it drops first: on cancellation the tree
+        // is killed while the leader is still unreaped.
+        let mut tree = tree::ProcessTree::attach(&child);
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
 
@@ -213,6 +221,8 @@ impl ProcessCommand {
             Some(timeout) => match tokio::time::timeout(timeout, run).await {
                 Ok(result) => result,
                 Err(_elapsed) => {
+                    // The tree first, while git is unreaped (see `tree`).
+                    tree.kill();
                     if let Err(error) = child.kill().await {
                         tracing::warn!(program = ?self.program, %error, "could not kill timed-out process");
                     }
@@ -225,6 +235,10 @@ impl ProcessCommand {
             },
         };
 
+        // On an I/O error the tree stays armed and is killed on return.
+        if result.is_ok() {
+            tree.disarm();
+        }
         let output = result.map_err(|source| ProcessError::Io {
             program: self.program.clone(),
             source,
@@ -401,12 +415,15 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    fn block_on<F: Future>(future: F) -> F::Output {
+    fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(future)
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        runtime().block_on(future)
     }
 
     fn machine_git() -> PathBuf {
@@ -649,23 +666,112 @@ mod tests {
         let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let mut git = GitCommand::new(machine_git());
+        // git -> sh -> sleep: the grandchild holds our pipes open unless the
+        // whole tree is killed.
         git.current_dir(dir.path())
             .config("alias.hang", "!sleep 10")
             .arg("hang")
             .timeout(Some(Duration::from_millis(300)));
 
+        // Runtime build and drop are timed on purpose: a pipe reader stuck on
+        // the blocking pool (Windows) makes dropping the runtime block.
         let started = Instant::now();
+        let runtime = runtime();
+        let err = runtime.block_on(git.output()).unwrap_err();
+        let until_result = started.elapsed();
+        drop(runtime);
+        let until_runtime_dropped = started.elapsed();
+
+        assert!(
+            matches!(err, GitError::Process(ProcessError::Timeout { .. })),
+            "{err:?}"
+        );
+        assert!(until_result < Duration::from_secs(5), "{until_result:?}");
+        assert!(
+            until_runtime_dropped < Duration::from_secs(5),
+            "{until_runtime_dropped:?}"
+        );
+    }
+
+    /// A `GitCommand` whose alias starts `sleep 30` in the background, records
+    /// its pid in `pid_file` and waits for it.
+    #[cfg(unix)]
+    fn git_with_background_sleep(dir: &std::path::Path, pid_file: &std::path::Path) -> GitCommand {
+        let mut git = GitCommand::new(machine_git());
+        git.current_dir(dir)
+            .config(
+                "alias.spawn-sleep",
+                format!("!sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+            )
+            .arg("spawn-sleep");
+        git
+    }
+
+    /// Reads the pid the alias recorded.
+    #[cfg(unix)]
+    fn recorded_pid(pid_file: &std::path::Path) -> libc::pid_t {
+        let text = std::fs::read_to_string(pid_file).unwrap();
+        text.trim().parse().unwrap()
+    }
+
+    /// Whether `pid` stops existing within a few seconds. A killed process
+    /// can linger briefly as a zombie until init reaps it, so this polls.
+    #[cfg(unix)]
+    fn pid_goes_away(pid: libc::pid_t) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: signal 0 only checks that the pid exists.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                return true;
+            }
+            if Instant::now() > deadline {
+                // Clean up so a failing run does not leave `sleep` behind.
+                // SAFETY: plain kill(2) of the pid the test started.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_the_grandchild() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("sleep.pid");
+        let mut git = git_with_background_sleep(dir.path(), &pid_file);
+        git.timeout(Some(Duration::from_millis(1000)));
+
         let err = block_on(git.output()).unwrap_err();
 
         assert!(
             matches!(err, GitError::Process(ProcessError::Timeout { .. })),
             "{err:?}"
         );
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
+        let pid = recorded_pid(&pid_file);
+        assert!(pid_goes_away(pid), "sleep {pid} survived the timeout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_the_future_kills_the_grandchild() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("sleep.pid");
+        let mut git = git_with_background_sleep(dir.path(), &pid_file);
+        git.timeout(None);
+
+        // The outer timeout drops the `output()` future mid-run, as a
+        // superseded read would be cancelled.
+        let outcome = block_on(async {
+            tokio::time::timeout(Duration::from_millis(1000), git.output()).await
+        });
+
+        assert!(outcome.is_err(), "git finished instead of being cancelled");
+        let pid = recorded_pid(&pid_file);
+        assert!(pid_goes_away(pid), "sleep {pid} survived cancellation");
     }
 
     #[test]

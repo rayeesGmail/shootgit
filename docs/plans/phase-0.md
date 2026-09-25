@@ -73,9 +73,6 @@ close it. When that task starts, move the item into its scope and delete it here
   `git --version` and `xcode-select -p` have no timeout. Needs a sync entry
   point on `ProcessCommand`, or async binary resolution. Owner: P0-07 (it
   touches the same spawn path).
-- From P0-06: a timeout or cancellation kills only git, not processes git
-  started (`sh`, `ssh`). Kill the whole tree (a process group on Unix, a Job
-  Object on Windows). Owner: P0-17 (a cancelled read must stop promptly).
 - From P0-06: `ProcessCommand` cannot write to the child's stdin. Needed to
   feed patches to `git apply` and for the credential protocol. Owner: P1-04.
 - From P0-06: an inherited `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_WORK_TREE` (the

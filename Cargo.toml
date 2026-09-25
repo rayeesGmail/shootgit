@@ -25,6 +25,11 @@ thiserror = "2.0.20"
 tokio = "1.53.1"
 tracing = "0.1.44"
 
+# Platform FFI for killing a spawned process tree (git_engine::process).
+# Both versions are already in Cargo.lock through tokio.
+libc = "0.2.189"
+windows-sys = "0.61.2"
+
 # Tauri shell only (src-tauri). Never depended on by the library crates:
 # git-engine and the forge crates stay free of Tauri (§4).
 tauri = "2.11.6"
