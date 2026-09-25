@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "os": "linux",
+  "arch": "x86_64",
+  "available_parallelism": 2,
+  "worker_threads": 1,
+  "git_limiter_cap": 2,
+  "operations": [
+    {
+      "name": "open_repo",
+      "wall_ms": 12.5,
+      "git_spawns": 1,
+      "rss_bytes": 52428800,
+      "peak_rss_bytes": 62914560
+    },
+    {
+      "name": "status",
+      "wall_ms": 7.25,
+      "git_spawns": 2,
+      "rss_bytes": 54525952,
+      "peak_rss_bytes": 62914560
+    },
+    {
+      "name": "shutdown",
+      "wall_ms": 0.0,
+      "git_spawns": 0,
+      "rss_bytes": null,
+      "peak_rss_bytes": null
+    }
+  ],
+  "totals": {
+    "wall_ms": 19.75,
+    "git_spawns": 3,
+    "peak_rss_bytes": 62914560,
+    "children_peak_rss_bytes": null
+  }
+}

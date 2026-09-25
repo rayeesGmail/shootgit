@@ -26,6 +26,12 @@ pub enum GitError {
         exit_code: Option<i32>,
         stderr: String,
     },
+    /// The command's `CancellationToken` fired: either while it waited for a
+    /// git slot (nothing was spawned) or while git ran (git and everything
+    /// it started were killed). A superseded read ends this way; callers
+    /// normally drop the error rather than show it.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 fn describe_exit(code: Option<i32>) -> String {

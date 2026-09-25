@@ -16,6 +16,9 @@ path = "src/lib.rs"
 tauri-build = { workspace = true }
 
 [dependencies]
+# The single tokio runtime the app runs on is built by git-engine's sizing
+# rule (§4 Low-resource operation) and handed to Tauri in `run()`.
+git-engine = { workspace = true }
 specta = { workspace = true }
 specta-typescript = { workspace = true }
 tauri = { workspace = true }
