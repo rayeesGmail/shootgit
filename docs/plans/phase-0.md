@@ -70,9 +70,10 @@ close it. When that task starts, move the item into its scope and delete it here
   (§9) has no plan task yet. Add one to the packaging work.
 - From P0-05 and P0-06: `git_binary::run()` still spawns with synchronous
   `std::process` instead of going through `git_engine::process`, so
-  `git --version` and `xcode-select -p` have no timeout. Needs a sync entry
-  point on `ProcessCommand`, or async binary resolution. Owner: P0-07 (it
-  touches the same spawn path).
+  `git --version` and `xcode-select -p` have no timeout. Since P0-17 these
+  probes also skip the shared limiter and the git spawn counter. Needs a sync
+  entry point on `ProcessCommand`, or async binary resolution. Owner: P0-07
+  (it touches the same spawn path).
 - From P0-06: `ProcessCommand` cannot write to the child's stdin. Needed to
   feed patches to `git apply` and for the credential protocol. Owner: P1-04.
 - From P0-06: an inherited `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_WORK_TREE` (the
@@ -90,8 +91,17 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-06: on Windows, a process that git starts between spawn and
   `AssignProcessToJobObject` escapes the Job Object and survives a tree kill
   (documented in `process/tree.rs`). Revisit if a leaked child ever shows up,
-  e.g. by spawning suspended. Owner: P0-17 (cancellation).
+  e.g. by spawning suspended. P0-17 left it open: the fix is Windows-only and
+  could not be checked on macOS. Owner: unassigned; give it to a task whose
+  work is verified on Windows.
 - From P0-06: children run in their own process group on Unix, so one that
   reads `/dev/tty` (ssh asking for a passphrase) is stopped by SIGTTIN instead
   of prompting in `git-engine-cli`. The GUI is unaffected. Owner: P1-25 (askpass
   replaces terminal prompts); until then the CLI cannot answer prompts.
+- From P0-17: `perf-harness` records this process's peak RSS, plus the
+  largest single child's peak on Unix (`None` on Windows). The spec's "peak
+  RSS, all processes" may need the sum across git children. Owner: P0-18.
+- From P0-17: the runtime caps worker threads at `max(1, cores - 1)` but
+  leaves tokio's blocking pool at its default (up to 512 threads on demand).
+  Nothing uses it yet. Decide whether the spec's thread budget covers it and
+  record the answer with `/adr`.
