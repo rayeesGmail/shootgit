@@ -30,3 +30,30 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 - Watcher reflects an external `touch` within 300 ms on all 3 OSes.
 - CI matrix green; `pnpm gen:types` idempotent; release dry-run produces artifacts.
 - No `unwrap()` outside tests; clippy clean.
+
+## Follow-ups
+
+Gaps found while reviewing finished tasks. Each one names the task that should
+close it. When that task starts, move the item into its scope and delete it here.
+
+- From P0-06: `git_binary::run()` still spawns with synchronous
+  `std::process` instead of going through `git_engine::process`. Needs a sync
+  entry point on `ProcessCommand`, or async binary resolution. Owner: P0-07
+  (it touches the same spawn path).
+- From P0-06: a timeout or cancellation kills only git, not processes git
+  started (`sh`, `ssh`). Kill the whole tree (a process group on Unix, a Job
+  Object on Windows). Owner: P0-17 (a cancelled read must stop promptly).
+- From P0-06: `ProcessCommand` cannot write to the child's stdin. Needed to
+  feed patches to `git apply` and for the credential protocol. Owner: P1-04.
+- From P0-06: an inherited `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_WORK_TREE` (the
+  app launched from a git hook) would redirect every `GitCommand`. Decide
+  whether to strip them, and write an ADR if they are stripped. Owner: P0-09
+  (`open_repo`).
+- From P0-06: all of stdout is held in memory. Large diffs and logs need a
+  streaming variant (§4 bounded memory). Owner: P1-02 (diffs); P2-02 uses
+  `gix` for the Log.
+- From P0-06: no locale is forced, so git's stderr comes out in the user's
+  language. Set `LC_ALL=C` (or equivalent) for spawns whose stderr is
+  classified. Owner: P1-10.
+- From P0-06: `DEFAULT_TIMEOUT` is 60 s and the spec gives no value. Confirm
+  or change it, and record the choice in the spec.

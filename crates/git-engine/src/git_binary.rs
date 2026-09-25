@@ -898,10 +898,11 @@ mod tests {
 
     // ---- real processes ----------------------------------------------------
     //
-    // These spawn processes, so they share a lock: on Linux, writing a script
-    // while another test thread forks can make exec fail with ETXTBSY.
+    // These spawn processes, so they take the crate-wide lock: on Linux,
+    // writing a script while another test thread forks can make exec fail
+    // with ETXTBSY.
 
-    static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test_support::SPAWN_LOCK;
 
     /// Writes an executable fake `git` that prints `stdout`.
     #[cfg(unix)]
