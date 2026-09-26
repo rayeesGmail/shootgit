@@ -189,3 +189,29 @@ close it. When that task starts, move the item into its scope and delete it here
   buffer and may not signal a rescan on overflow, so a large burst could be
   lost. Late FSEvents deliveries after an `OwnWrite` guard drops cost one
   extra refresh. Measure both in the P0-18 smoke. Owner: P0-18.
+- From P0-11: `SettingsStore::update` and `settings::save` block and fsync.
+  Tauri runs sync commands on the main thread, so `open_repo` (which records
+  a recent repo) and any command that writes settings must be async and call
+  them through `spawn_blocking` (see the P0-17 blocking-pool item). Owner:
+  P0-12.
+- From P0-11: `Settings::git_path` is not yet passed to
+  `ResolveOptions::from_login_shell_env` when the app resolves git. A path
+  that is not UTF-8 cannot be saved (serde_json fails), so such a repo cannot
+  be recorded as recent; decide it with the P0-08 non-UTF-8 IPC item.
+  Owner: P0-12.
+- From P0-11: `run()` fails startup when `app_config_dir` cannot be
+  determined, while a missing or corrupt file only falls back to defaults.
+  Decide whether that case should run on in-memory defaults. Owner: P0-12.
+- From P0-11: the file format (a JSON object with no schema version; unknown
+  fields are ignored and then dropped on the next save, so a downgrade loses
+  newer settings) and the corrupt-file rule (moved to
+  `settings.json.corrupt`, replacing an older copy) are not in the spec.
+  Record them with `/adr`.
+- From P0-11: there is no way to remove a recent repo, which the settings UI
+  and a moved or deleted repo (§5 rule 9) need. An empty-string `git_path`
+  counts as configured and is a hard error (P0-05), so the UI must write
+  `null`. Owner: unassigned (settings UI task).
+- From P0-11: a symlinked `settings.json` (dotfile managers) is replaced by a
+  regular file on save. On Windows the rename has no retry when antivirus or
+  the indexer holds the file open, so a transient failure returns
+  `SettingsError::Write`. Owner: unassigned (Windows-verified task).
