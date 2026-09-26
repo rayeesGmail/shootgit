@@ -21,8 +21,8 @@ use git_engine::process::{cap_for, CancellationToken, GitCommand, Limiter, Prior
 use git_engine::runtime;
 use tokio::sync::watch;
 
-fn machine_git() -> PathBuf {
-    resolve(&ResolveOptions::from_env(None)).unwrap().path
+async fn machine_git() -> PathBuf {
+    resolve(&ResolveOptions::from_env(None)).await.unwrap().path
 }
 
 /// Yields until `condition` holds, or panics after a few seconds.
@@ -250,7 +250,7 @@ async fn a_permit_handed_to_a_dropped_waiter_is_released_again() {
 async fn cancelled_read_returns_within_50_ms_while_git_is_running() {
     let dir = tempfile::tempdir().unwrap();
     let token = CancellationToken::new();
-    let mut git = GitCommand::new(machine_git());
+    let mut git = GitCommand::new(machine_git().await);
     // git -> sh -> sleep: the grandchild holds the pipes, so only a tree kill
     // lets the read return.
     git.current_dir(dir.path())
@@ -287,7 +287,7 @@ async fn cancelled_read_returns_within_50_ms_while_queued_behind_the_limiter() {
     let held = limiter.acquire(Priority::Visible, &never).await.unwrap();
 
     let token = CancellationToken::new();
-    let mut git = GitCommand::new(machine_git());
+    let mut git = GitCommand::new(machine_git().await);
     git.arg("--version")
         .limiter(limiter.clone())
         .cancel_token(token.clone());
@@ -322,7 +322,7 @@ async fn pre_cancelled_read_never_takes_a_slot() {
     let limiter = Limiter::new(NonZeroUsize::new(1).unwrap());
     let token = CancellationToken::new();
     token.cancel();
-    let mut git = GitCommand::new(machine_git());
+    let mut git = GitCommand::new(machine_git().await);
     git.arg("--version")
         .limiter(limiter.clone())
         .cancel_token(token);
@@ -341,11 +341,12 @@ async fn concurrent_git_commands_are_bounded_by_their_limiter() {
     // 900 ms in total, and never more than 2 in flight.
     let dir = tempfile::tempdir().unwrap();
     let limiter = Limiter::new(NonZeroUsize::new(2).unwrap());
+    let git_path = machine_git().await;
     let started = Instant::now();
 
     let tasks: Vec<_> = (0..5)
         .map(|_| {
-            let mut git = GitCommand::new(machine_git());
+            let mut git = GitCommand::new(&git_path);
             git.current_dir(dir.path())
                 .config("alias.nap", "!sleep 0.3")
                 .arg("nap")
@@ -371,10 +372,11 @@ async fn git_commands_use_the_shared_limiter_and_are_counted() {
     // Other tests in this binary spawn git concurrently, so the process-wide
     // counters can only be checked for growth here; the exact +1 is checked
     // under the unit tests' spawn lock in `process.rs`.
+    // Resolving git spawns too, so it happens before the counts are read.
+    let mut git = GitCommand::new(machine_git().await);
+    git.arg("--version");
     let spawns_before = git_engine::process::git_spawn_count();
     let total_before = git_engine::process::spawn_count();
-    let mut git = GitCommand::new(machine_git());
-    git.arg("--version");
 
     git.output().await.unwrap();
 

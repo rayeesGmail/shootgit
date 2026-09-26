@@ -37,7 +37,14 @@ pub fn run() -> Result<(), tauri::Error> {
     // The single runtime, installed before the builder is constructed and
     // kept alive until the event loop returns. Nothing above this line may
     // start a runtime, a thread or a timer.
-    let _runtime = install_runtime()?;
+    let runtime = install_runtime()?;
+
+    // macOS: ask the user's login shell for its PATH once (2 s timeout,
+    // falls back to this process's PATH), so git and other tools are found
+    // where a terminal finds them (SPEC §4 Process model, §5 step 2). It runs
+    // while the window comes up; git resolution awaits the same result via
+    // `ResolveOptions::from_login_shell_env`. A no-op on other OSes.
+    drop(runtime.spawn(git_engine::login_shell::init()));
 
     // The invoke handler comes from the specta builder, never from a second
     // `tauri::generate_handler!`: a command reachable from the frontend but

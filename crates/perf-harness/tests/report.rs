@@ -12,8 +12,8 @@ use git_engine::git_binary::{resolve, ResolveOptions};
 use git_engine::process::GitCommand;
 use perf_harness::{rss, Harness, Operation, Report, Totals, SCHEMA_VERSION};
 
-fn machine_git() -> PathBuf {
-    resolve(&ResolveOptions::from_env(None)).unwrap().path
+async fn machine_git() -> PathBuf {
+    resolve(&ResolveOptions::from_env(None)).await.unwrap().path
 }
 
 fn golden(name: &str) -> String {
@@ -107,11 +107,12 @@ fn an_empty_harness_still_produces_a_complete_report() {
 
 #[tokio::test]
 async fn operations_record_wall_time_git_spawns_and_rss() {
+    // Resolving git spawns `git --version` too, so it happens before timing.
+    let mut git = GitCommand::new(machine_git().await);
+    git.arg("--version");
     let mut harness = Harness::new();
 
     let timer = harness.begin("git_version");
-    let mut git = GitCommand::new(machine_git());
-    git.arg("--version");
     git.output().await.unwrap();
     harness.end(timer);
 

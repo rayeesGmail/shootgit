@@ -12,7 +12,7 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 - [x] **P0-05** `git_engine::git_binary`: resolver order (settings path → PATH git ≥ 2.30 → bundled placeholder), macOS Xcode-stub detection (`xcode-select -p` fails ⇒ skip `/usr/bin/git`), version parsing. Unit tests with fake PATH dirs per OS. · model: opus
 - [x] **P0-06** `git_engine::process::GitCommand`: builder over `tokio::process`, always passes `--no-optional-locks -c core.quotepath=off`, sets `CREATE_NO_WINDOW` on Windows, `GIT_TERMINAL_PROMPT=0`, timeout, captures stdout/stderr as bytes, `-z` split helper. Tests: timeout fires; NUL split handles empty fields; exit code mapping to `GitError`. Reserve env-injection points for `GIT_ASKPASS`/`SSH_ASKPASS` and a per-spawn `-c` list (used by P1-25 and P4-13). Build it on a generic process builder in the same module (`CREATE_NO_WINDOW`, login-shell PATH, timeout, byte capture) that non-git tools reuse (`ssh`, `ssh-add`, `ssh-keygen` in P1-25, P1-26, P4-27). · model: opus
 - [x] **P0-17** Low-resource runtime and limiter (§4 Low-resource operation): build one tokio runtime sized `max(1, available_parallelism() - 1)` worker threads and hand it to Tauri via `tauri::async_runtime::set(runtime.handle().clone())` before `tauri::Builder::default()` so the app has a single runtime; `GitCommand` goes through a shared concurrency limiter (semaphore of 2 when available_parallelism() ≤ 4, else 4) with two priority lanes (visible-view work before background work); every read accepts a `CancellationToken` and stops promptly when cancelled; `perf/` harness (`crates/perf-harness` or `scripts/perf/`) records RSS, git spawn count and wall time per named operation to JSON. Tests: limiter never exceeds its cap under 50 concurrent requests; high-priority request completes before queued low-priority ones; cancelled read returns within 50 ms. · model: best
-- [ ] **P0-07** macOS login-shell environment: resolve `PATH` once via the user's shell (`$SHELL -ilc 'echo $PATH'`) with a 2 s timeout and fallback; used by `GitCommand`. Test on macOS runner. · model: opus
+- [x] **P0-07** macOS login-shell environment: resolve `PATH` once via the user's shell (`$SHELL -ilc 'echo $PATH'`) with a 2 s timeout and fallback; used by `GitCommand`. Test on macOS runner. · model: opus
 - [ ] **P0-08** `git_engine::status`: run `git status --porcelain=v2 -z --branch --untracked-files=all` and parse into `RepoInfo` + `Vec<StatusEntry>` (ordinary, renamed/copied, unmerged, untracked, ignored). Fixture script `scripts/fixtures/basic.sh` creates a repo with each entry kind. Tests for all kinds incl. rename with spaces and unicode path. · model: opus
 - [ ] **P0-09** `RepoActor`: tokio task per repo owning `Repo` handle, mailbox for commands, serialises writes, concurrent reads. `open_repo(path)` discovers `.git` (incl. worktree `.git` file). Test: two concurrent reads, one write, ordering preserved. · model: opus
 - [ ] **P0-10** File watcher: `notify` recursive watch on worktree + `.git` (HEAD, index, refs/, packed-refs, *_HEAD, rebase-merge/, rebase-apply/, logs/), respects `.gitignore` via `ignore` crate, coalesces into `RepoChanged { kinds }` after 150 ms (250 ms Windows). Own-write suppression via generation counter. Tests: touch file → one event; edit `.git/HEAD` → `kinds` contains `head`. · model: best
@@ -60,20 +60,8 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-05: the 2.30 minimum is enforced on the settings and bundled
   sources too, though §5 attaches it only to PATH (CLAUDE.md makes 2.30 the
   overall minimum). Confirm it in the same ADR.
-- From P0-05: `ResolveOptions::from_env` reads this process's `PATH`. On
-  macOS the caller must overwrite `search_path` with the login-shell PATH.
-  Owner: P0-07.
-- From P0-05: the Xcode-stub check compares paths exactly and does not
-  resolve symlinks, so `/usr/bin/git` reached through a symlink is not
-  recognised as the stub. Owner: P0-07.
 - From P0-05: `bundled_git_path()` is always `None`. Shipping a bundled git
   (§9) has no plan task yet. Add one to the packaging work.
-- From P0-05 and P0-06: `git_binary::run()` still spawns with synchronous
-  `std::process` instead of going through `git_engine::process`, so
-  `git --version` and `xcode-select -p` have no timeout. Since P0-17 these
-  probes also skip the shared limiter and the git spawn counter. Needs a sync
-  entry point on `ProcessCommand`, or async binary resolution. Owner: P0-07
-  (it touches the same spawn path).
 - From P0-06: `ProcessCommand` cannot write to the child's stdin. Needed to
   feed patches to `git apply` and for the credential protocol. Owner: P1-04.
 - From P0-06: an inherited `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_WORK_TREE` (the
@@ -105,3 +93,21 @@ close it. When that task starts, move the item into its scope and delete it here
   leaves tokio's blocking pool at its default (up to 512 threads on demand).
   Nothing uses it yet. Decide whether the spec's thread budget covers it and
   record the answer with `/adr`.
+- From P0-07: ADR 0006 (login-shell `PATH` via `git_engine::process`
+  instead of `fix-path-env`) has no row in the spec's §12 Decisions log, and
+  §9's table still names `fix-path-env`. Update the Claude Doc and
+  re-export; never hand-edit `SPEC.md`.
+- From P0-07: only `PATH` is taken from the login shell, not `SSH_AUTH_SOCK`,
+  `LANG` or the rest of the environment. Tools spawned before
+  `login_shell::init()` finishes get this process's `PATH`; git resolution
+  avoids that by awaiting `ResolveOptions::from_login_shell_env`. The `ssh`,
+  `ssh-add` and `ssh-keygen` spawns must await `init()` too and extend
+  `login_shell` for any other variables they need (ADR 0006). Owner: P1-25.
+- From P0-07: the probe timeouts (10 s for `git --version`, 5 s for
+  `xcode-select -p`) are not in the spec. Confirm or change them, and record
+  the choice in the spec with the `DEFAULT_TIMEOUT` item above.
+- From P0-07: some login shells fall back to this process's `PATH`: tcsh
+  (`-ilc` fails), nushell, and rc files that `exec tmux` (they hit the 2 s
+  timeout; a tmux server started that way survives the kill). An unset or
+  relative `$SHELL` also falls back; the shell is not read from `getpwuid`.
+  Revisit if users report git not being found. Owner: unassigned.
