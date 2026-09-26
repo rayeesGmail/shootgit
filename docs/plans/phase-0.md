@@ -93,3 +93,21 @@ close it. When that task starts, move the item into its scope and delete it here
   leaves tokio's blocking pool at its default (up to 512 threads on demand).
   Nothing uses it yet. Decide whether the spec's thread budget covers it and
   record the answer with `/adr`.
+- From P0-07: ADR 0006 (login-shell `PATH` via `git_engine::process`
+  instead of `fix-path-env`) has no row in the spec's §12 Decisions log, and
+  §9's table still names `fix-path-env`. Update the Claude Doc and
+  re-export; never hand-edit `SPEC.md`.
+- From P0-07: only `PATH` is taken from the login shell, not `SSH_AUTH_SOCK`,
+  `LANG` or the rest of the environment. Tools spawned before
+  `login_shell::init()` finishes get this process's `PATH`; git resolution
+  avoids that by awaiting `ResolveOptions::from_login_shell_env`. The `ssh`,
+  `ssh-add` and `ssh-keygen` spawns must await `init()` too and extend
+  `login_shell` for any other variables they need (ADR 0006). Owner: P1-25.
+- From P0-07: the probe timeouts (10 s for `git --version`, 5 s for
+  `xcode-select -p`) are not in the spec. Confirm or change them, and record
+  the choice in the spec with the `DEFAULT_TIMEOUT` item above.
+- From P0-07: some login shells fall back to this process's `PATH`: tcsh
+  (`-ilc` fails), nushell, and rc files that `exec tmux` (they hit the 2 s
+  timeout; a tmux server started that way survives the kill). An unset or
+  relative `$SHELL` also falls back; the shell is not read from `getpwuid`.
+  Revisit if users report git not being found. Owner: unassigned.
