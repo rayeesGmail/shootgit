@@ -32,6 +32,13 @@
 //! exists another process is mid-write, so the batch is held until the lock
 //! goes, but no longer than [`WatchOptions::lock_hold`] (§5 row 7).
 //!
+//! A directory's own modification event is noise: Windows reports one for
+//! the parent whenever an entry inside it is created, removed or renamed
+//! (its last-write time moves), and the entry has its own event. Creating,
+//! removing or renaming a directory is a change and counts. On macOS,
+//! FSEvents may also deliver changes made in the moments before the watcher
+//! started; they cost one harmless refresh.
+//!
 //! Between windows the watcher is idle: no timer runs, nothing polls (§4
 //! "Idle CPU 0 %").
 //!
@@ -93,7 +100,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, RemoveKind};
+use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, ModifyKind, RemoveKind};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
@@ -632,17 +639,38 @@ impl Classifier {
             return ChangeKinds::EMPTY;
         }
         let hint = dir_hint(&event.kind);
+        let content_modify = is_content_modify(&event.kind);
         let mut kinds = ChangeKinds::EMPTY;
         for path in &event.paths {
-            kinds |= self.classify_path(path, hint);
+            kinds |= self.classify_path(path, hint, content_modify);
         }
         kinds
     }
 
     /// `is_dir` says whether `path` is a directory when the event told us;
     /// otherwise the file system is asked, which a removed path answers with
-    /// "no".
-    fn classify_path(&mut self, path: &Path, is_dir: Option<bool>) -> ChangeKinds {
+    /// "no". `content_modify` says the event reports the path's contents or
+    /// metadata changing (not a create, remove or rename).
+    fn classify_path(
+        &mut self,
+        path: &Path,
+        is_dir: Option<bool>,
+        content_modify: bool,
+    ) -> ChangeKinds {
+        // A directory's own contents or metadata "changing" is its mtime
+        // moving because an entry inside it was created, removed or renamed
+        // (ReadDirectoryChangesW reports exactly that for the parent), and
+        // the entry has its own event. The stat is paid for Modify events
+        // only; a create, remove or rename of a directory is a real change.
+        let is_dir = if content_modify {
+            Some(is_existing_dir(path))
+        } else {
+            is_dir
+        };
+        if content_modify && is_dir == Some(true) {
+            tracing::trace!(?path, "directory modified: an entry's own event carries it");
+            return ChangeKinds::EMPTY;
+        }
         // The git dir first: in the usual layout it is inside the working
         // tree, and in a linked worktree it is inside the common dir.
         if let Ok(relative) = path.strip_prefix(&self.roots.git_dir) {
@@ -768,6 +796,22 @@ fn dir_hint(kind: &EventKind) -> Option<bool> {
         EventKind::Create(CreateKind::File) | EventKind::Remove(RemoveKind::File) => Some(false),
         _ => None,
     }
+}
+
+/// Whether the event reports the path's contents or metadata changing, as
+/// opposed to the path being created, removed or renamed.
+fn is_content_modify(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Modify(
+            ModifyKind::Any | ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Other
+        )
+    )
+}
+
+/// Whether `path` is a directory right now (a symlink to one is not).
+fn is_existing_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
 /// A matcher for `workdir` that applies `.gitignore` files at every level,
@@ -1260,6 +1304,125 @@ mod tests {
         assert_eq!(
             classifier.classify(&modify(workdir.join("excluded.txt"))),
             ChangeKinds::of(ChangeKind::Status)
+        );
+    }
+
+    /// ReadDirectoryChangesW reports `Modify(Any)` for a directory whenever
+    /// an entry inside it changes; the other backends report similar
+    /// metadata events. Only the entry's own event counts.
+    #[test]
+    fn a_directorys_own_modify_is_noise_but_create_remove_and_rename_count() {
+        use notify::event::RenameMode;
+
+        let (_dir, roots) = scratch_roots();
+        let workdir = roots.workdir.clone();
+        fs::create_dir_all(workdir.join(".git/refs/heads")).unwrap();
+        fs::write(workdir.join(".git/refs/heads/main"), "0123\n").unwrap();
+        fs::write(workdir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir_all(workdir.join("src")).unwrap();
+        fs::write(workdir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut classifier = Classifier::new(roots);
+        let event =
+            |kind: EventKind, relative: &str| Event::new(kind).add_path(workdir.join(relative));
+        let status = ChangeKinds::of(ChangeKind::Status);
+
+        // Content or metadata "changes" of existing directories: nothing, in
+        // the working tree and in the git dir alike.
+        for kind in [
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Other),
+        ] {
+            assert_eq!(
+                classifier.classify(&event(kind, "sub")),
+                ChangeKinds::EMPTY,
+                "{kind:?}"
+            );
+            assert_eq!(
+                classifier.classify(&event(kind, "src")),
+                ChangeKinds::EMPTY,
+                "{kind:?}"
+            );
+            assert_eq!(
+                classifier.classify(&event(kind, ".git/refs/heads")),
+                ChangeKinds::EMPTY,
+                "{kind:?}"
+            );
+            assert_eq!(
+                classifier.classify(&event(kind, ".git/refs")),
+                ChangeKinds::EMPTY,
+                "{kind:?}"
+            );
+        }
+        // The same events on regular files are changes.
+        assert_eq!(
+            classifier.classify(&event(EventKind::Modify(ModifyKind::Any), "src/main.rs")),
+            status
+        );
+        assert_eq!(
+            classifier.classify(&event(
+                EventKind::Modify(ModifyKind::Any),
+                ".git/refs/heads/main"
+            )),
+            ChangeKinds::of(ChangeKind::Refs)
+        );
+        assert_eq!(
+            classifier.classify(&event(
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+                ".git/HEAD"
+            )),
+            ChangeKinds::of(ChangeKind::Head)
+        );
+        // Creating, removing or renaming a directory is a change.
+        for kind in [
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            EventKind::Create(CreateKind::Any),
+            EventKind::Create(CreateKind::Folder),
+        ] {
+            assert_eq!(classifier.classify(&event(kind, "src")), status, "{kind:?}");
+            assert_eq!(
+                classifier.classify(&event(kind, ".git/refs/heads")),
+                ChangeKinds::of(ChangeKind::Refs),
+                "{kind:?}"
+            );
+        }
+        assert_eq!(
+            classifier.classify(&event(EventKind::Remove(RemoveKind::Any), "gone")),
+            status
+        );
+        assert_eq!(
+            classifier.classify(&event(EventKind::Remove(RemoveKind::Folder), "gone")),
+            status
+        );
+
+        // The Windows shape of "create an ignored file": the file's own
+        // event and its parent's Modify, both nothing.
+        assert_eq!(
+            classifier.classify(&event(EventKind::Create(CreateKind::Any), "sub/secret.txt")),
+            ChangeKinds::EMPTY
+        );
+        assert_eq!(
+            classifier.classify(&event(EventKind::Modify(ModifyKind::Any), "sub")),
+            ChangeKinds::EMPTY
+        );
+        // And of "create then remove a ref lock": only the parent's Modify
+        // is left, which is nothing.
+        assert_eq!(
+            classifier.classify(&event(
+                EventKind::Create(CreateKind::Any),
+                ".git/refs/heads/x.lock"
+            )),
+            ChangeKinds::EMPTY
+        );
+        assert_eq!(
+            classifier.classify(&event(
+                EventKind::Modify(ModifyKind::Any),
+                ".git/refs/heads"
+            )),
+            ChangeKinds::EMPTY
         );
     }
 

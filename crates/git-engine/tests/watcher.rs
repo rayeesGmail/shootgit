@@ -109,6 +109,14 @@ impl Fixture {
             .await
             .unwrap()
     }
+
+    /// [`watch`](Self::watch), then [`settle`]: for tests that assert quiet
+    /// or exact kinds after writes made before the watch started.
+    async fn watch_settled(&self) -> (Watcher, Events) {
+        let (watcher, mut events) = self.watch().await;
+        settle(&mut events).await;
+        (watcher, events)
+    }
 }
 
 /// Writes `contents` to `path`, creating parent directories.
@@ -165,6 +173,20 @@ async fn assert_quiet(events: &mut Events, what: &str) {
     }
 }
 
+/// Drains whatever the backend delivers for changes made just before the
+/// watch started (FSEvents does that), returning once a full [`quiet`]
+/// period passes with nothing. Nothing is asserted about what is drained.
+async fn settle(events: &mut Events) {
+    loop {
+        match timeout(quiet(), events.recv()).await {
+            Err(_) => return,
+            Ok(Some(Ok(changed))) => eprintln!("drained a pre-watch event: {changed:?}"),
+            Ok(Some(Err(error))) => panic!("the watcher failed while settling: {error}"),
+            Ok(None) => panic!("the watcher stopped while settling"),
+        }
+    }
+}
+
 fn only(kind: ChangeKind) -> ChangeKinds {
     ChangeKinds::from_iter([kind])
 }
@@ -175,6 +197,10 @@ fn only(kind: ChangeKind) -> ChangeKinds {
 async fn touching_a_file_produces_exactly_one_event() {
     let fixture = Fixture::new().await;
     let (watcher, mut events) = fixture.watch().await;
+    // The fixture's own `git commit` ran moments before the watch; FSEvents
+    // may still deliver it. Draining first keeps the touch's event the one
+    // measured; the touch-to-event latency itself is unaffected.
+    settle(&mut events).await;
 
     let touched_at = Instant::now();
     touch(fixture.workdir().join("tracked.txt"));
@@ -196,7 +222,7 @@ async fn touching_a_file_produces_exactly_one_event() {
 #[tokio::test]
 async fn editing_head_reports_head() {
     let fixture = Fixture::new().await;
-    let (_watcher, mut events) = fixture.watch().await;
+    let (_watcher, mut events) = fixture.watch_settled().await;
 
     write(fixture.git_dir().join("HEAD"), "ref: refs/heads/other\n");
     let kinds = kinds_after(&mut events).await;
@@ -211,7 +237,7 @@ async fn editing_head_reports_head() {
 async fn git_dir_paths_map_to_their_kinds() {
     let fixture = Fixture::new().await;
     let git_dir = fixture.git_dir();
-    let (_watcher, mut events) = fixture.watch().await;
+    let (_watcher, mut events) = fixture.watch_settled().await;
 
     let cases: [(&str, ChangeKind); 8] = [
         ("index", ChangeKind::Index),
@@ -250,7 +276,7 @@ async fn git_dir_paths_map_to_their_kinds() {
 #[tokio::test]
 async fn changes_within_the_window_coalesce_into_one_event() {
     let fixture = Fixture::new().await;
-    let (_watcher, mut events) = fixture.watch().await;
+    let (_watcher, mut events) = fixture.watch_settled().await;
 
     let names = [
         "a.txt",
@@ -278,7 +304,7 @@ async fn ignored_paths_produce_no_event() {
     write(workdir.join("sub/.gitignore"), "secret.txt\n");
     write(fixture.git_dir().join("info/exclude"), "excluded.txt\n");
     fs::create_dir(workdir.join("build")).unwrap();
-    let (_watcher, mut events) = fixture.watch().await;
+    let (_watcher, mut events) = fixture.watch_settled().await;
 
     write(workdir.join("debug.log"), "log\n");
     write(workdir.join("build/out.bin"), "bin\n");
@@ -297,7 +323,7 @@ async fn editing_gitignore_reloads_the_rules() {
     let fixture = Fixture::new().await;
     let workdir = fixture.workdir();
     write(workdir.join(".gitignore"), "");
-    let (_watcher, mut events) = fixture.watch().await;
+    let (_watcher, mut events) = fixture.watch_settled().await;
 
     write(workdir.join(".gitignore"), "*.log\n");
     // Changing the rules changes the untracked set, so it is itself a change.
@@ -316,7 +342,7 @@ async fn editing_gitignore_reloads_the_rules() {
 #[tokio::test]
 async fn own_writes_are_suppressed_until_the_guard_is_dropped() {
     let fixture = Fixture::new().await;
-    let (watcher, mut events) = fixture.watch().await;
+    let (watcher, mut events) = fixture.watch_settled().await;
     assert_eq!(watcher.generation(), 0);
 
     let own = watcher.begin_write();
@@ -344,7 +370,7 @@ async fn own_writes_are_suppressed_until_the_guard_is_dropped() {
 #[tokio::test]
 async fn overlapping_guards_suppress_until_the_last_one_goes() {
     let fixture = Fixture::new().await;
-    let (watcher, mut events) = fixture.watch().await;
+    let (watcher, mut events) = fixture.watch_settled().await;
 
     let first = watcher.begin_write();
     let second = watcher.begin_write();
@@ -368,6 +394,7 @@ async fn an_index_lock_holds_the_event_until_it_disappears() {
         ..WatchOptions::default()
     };
     let (_watcher, mut events) = Watcher::spawn(&fixture.repo(), options).await.unwrap();
+    settle(&mut events).await;
 
     write(&lock, "");
     write(fixture.workdir().join("mid-operation.txt"), "x\n");
@@ -391,6 +418,7 @@ async fn a_stale_index_lock_only_delays_events() {
         ..WatchOptions::default()
     };
     let (_watcher, mut events) = Watcher::spawn(&fixture.repo(), options).await.unwrap();
+    settle(&mut events).await;
 
     write(fixture.git_dir().join("index.lock"), "");
     let written_at = Instant::now();
@@ -410,7 +438,7 @@ async fn a_stale_index_lock_only_delays_events() {
 #[tokio::test]
 async fn dropping_the_handle_stops_the_watcher() {
     let fixture = Fixture::new().await;
-    let (watcher, mut events) = fixture.watch().await;
+    let (watcher, mut events) = fixture.watch_settled().await;
     let stopped = watcher.stopped();
 
     drop(watcher);
@@ -477,6 +505,7 @@ async fn a_linked_worktree_watches_its_own_git_dir_and_the_common_dir() {
     let (_watcher, mut events) = Watcher::spawn(&repo, WatchOptions::default())
         .await
         .unwrap();
+    settle(&mut events).await;
 
     write(linked.join("new.txt"), "x\n");
     assert_eq!(next(&mut events).await.kinds, only(ChangeKind::Status));
@@ -511,6 +540,7 @@ async fn events_during_a_write_are_buffered_outside_the_actor() {
     let (watcher, mut events) = Watcher::spawn(&repo, WatchOptions::default())
         .await
         .unwrap();
+    settle(&mut events).await;
     let actor = RepoActor::spawn(repo);
     let gate = Arc::new(Semaphore::new(0));
 
