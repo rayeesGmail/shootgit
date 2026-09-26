@@ -58,6 +58,7 @@ name = "app"
 version = "0.0.0"
 dependencies = [
  "git-engine",
+ "serde",
  "serde_json",
  "specta",
  "specta-typescript",
@@ -65,6 +66,8 @@ dependencies = [
  "tauri-build",
  "tauri-specta",
  "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
