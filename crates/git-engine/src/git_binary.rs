@@ -1148,12 +1148,34 @@ mod tests {
         assert_eq!(output.trim(), "git version 2.44.0 --version");
     }
 
+    /// Real spawns; only `hanging` is short, as a new script's first exec can exceed it.
+    #[cfg(unix)]
+    struct ShortTimeoutFor<'a> {
+        hanging: &'a Path,
+        short: SystemProbe,
+    }
+
+    #[cfg(unix)]
+    impl Probe for ShortTimeoutFor<'_> {
+        async fn version_output(&self, git: &Path) -> Result<String, GitBinaryError> {
+            if git == self.hanging {
+                self.short.version_output(git).await
+            } else {
+                SystemProbe::default().version_output(git).await
+            }
+        }
+
+        async fn xcode_clt_installed(&self) -> bool {
+            unreachable!("no Apple stub among the candidates")
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn hanging_version_probe_times_out_and_the_candidate_is_skipped() {
         let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let [hang, good] = dirs();
-        let hanging = script(hang.path(), "git", "exec sleep 10");
+        let hanging = script(hang.path(), "git", "exec sleep 30");
         let git_good = script_git(good.path(), "git version 2.45.2");
         let probe = SystemProbe {
             version_timeout: Duration::from_millis(300),
@@ -1182,6 +1204,10 @@ mod tests {
             search_path: search_path(&[hang.path(), good.path()]),
             ..Default::default()
         };
+        let probe = ShortTimeoutFor {
+            hanging: &hanging,
+            short: probe,
+        };
         let found = block_on(resolve_with(&options, &probe)).unwrap();
         assert_eq!(found.path, git_good);
     }
@@ -1191,23 +1217,34 @@ mod tests {
     fn xcode_select_probe_reads_the_exit_status_and_times_out() {
         let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let [dir] = dirs();
-        let probe_for = |body: &str, name: &str| SystemProbe {
+        let probe_for = |body: &str, name: &str, timeout: Duration| SystemProbe {
             xcode_select: script(dir.path(), name, body),
-            xcode_timeout: Duration::from_millis(300),
+            xcode_timeout: timeout,
             ..SystemProbe::default()
         };
         let git_before = crate::process::git_spawn_count();
         let total_before = crate::process::spawn_count();
 
+        // Default timeout: a new script's first exec can exceed 300 ms on macOS.
         assert!(block_on(
-            probe_for("echo /Library/Developer/CommandLineTools", "ok").xcode_clt_installed()
+            probe_for(
+                "echo /Library/Developer/CommandLineTools",
+                "ok",
+                XCODE_SELECT_TIMEOUT
+            )
+            .xcode_clt_installed()
         ));
         assert!(!block_on(
-            probe_for("echo 'xcode-select: error' >&2; exit 2", "missing").xcode_clt_installed()
+            probe_for(
+                "echo 'xcode-select: error' >&2; exit 2",
+                "missing",
+                XCODE_SELECT_TIMEOUT
+            )
+            .xcode_clt_installed()
         ));
         let started = std::time::Instant::now();
         assert!(!block_on(
-            probe_for("exec sleep 10", "hang").xcode_clt_installed()
+            probe_for("exec sleep 30", "hang", Duration::from_millis(300)).xcode_clt_installed()
         ));
         assert!(
             started.elapsed() < Duration::from_secs(5),

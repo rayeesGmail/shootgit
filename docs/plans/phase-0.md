@@ -123,15 +123,6 @@ close it. When that task starts, move the item into its scope and delete it here
   Windows, but a local run from PowerShell without Git's `usr\bin` on `PATH`
   may get WSL's `bash.exe` or none. Document it in `CONTRIBUTING.md`.
   Owner: P0-15.
-- From P0-08: two P0-05 tests with 300 ms probe timeouts
-  (`hanging_version_probe_times_out_and_the_candidate_is_skipped`,
-  `xcode_select_probe_reads_the_exit_status_and_times_out`) failed once under
-  a loaded full-workspace run on macOS and passed on rerun. P0-10's review saw
-  them fail again in an unloaded serial `cargo test --workspace` (the lib
-  binary now also runs 23 watcher unit tests), then pass three times in a
-  row. During P0-12 they failed in 2 of 5 full-workspace runs on macOS, so
-  they will flake the PR matrix. Loosen their timing before they flake in
-  CI. Owner: unassigned; take it before P0-13.
 - From P0-08: `RUSTDOCFLAGS="-D warnings" cargo doc -p git-engine --no-deps`
   fails on two redundant explicit link targets (`git_binary.rs:159`, `:177`).
   CI does not run rustdoc. Fix them and add a doc check. Owner: P0-15, or any
