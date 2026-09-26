@@ -66,10 +66,6 @@ close it. When that task starts, move the item into its scope and delete it here
   (§9) has no plan task yet. Add one to the packaging work.
 - From P0-06: `ProcessCommand` cannot write to the child's stdin. Needed to
   feed patches to `git apply` and for the credential protocol. Owner: P1-04.
-- From P0-06: an inherited `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_WORK_TREE` (the
-  app launched from a git hook) would redirect every `GitCommand`. Decide
-  whether to strip them, and write an ADR if they are stripped. Owner: P0-09
-  (`open_repo`).
 - From P0-06: all of stdout is held in memory. Large diffs and logs need a
   streaming variant (§4 bounded memory). Owner: P1-02 (diffs); P2-02 uses
   `gix` for the Log.
@@ -118,8 +114,9 @@ close it. When that task starts, move the item into its scope and delete it here
   both and P0-13 needs `Serialize`. Paths are `PathBuf` holding git's raw
   bytes on Unix, and serde fails on a path that is not UTF-8; decide how such
   paths cross IPC. Owner: P0-12.
-- From P0-08: `RepoInfo` lacks the §5 fields `id` (Owner: P0-09 or P0-12)
-  and `state` (Owner: P2-11, from the markers in `.git`).
+- From P0-08: `RepoInfo` lacks the §5 fields `id` (Owner: P0-12, which owns
+  the open-repo registry and IPC ids) and `state` (Owner: P2-11, from the
+  markers in `.git`).
 - From P0-08: `status` always runs in the visible lane of the git limiter.
   A repo that is not active must refresh in the background lane (§4
   Low-resource operation). Add a priority option when that first happens.
@@ -143,3 +140,23 @@ close it. When that task starts, move the item into its scope and delete it here
   fails on two redundant explicit link targets (`git_binary.rs:159`, `:177`).
   CI does not run rustdoc. Fix them and add a doc check. Owner: P0-15, or any
   later CI change.
+- From P0-09: ADR 0007 (clear inherited repository-local git variables on
+  every spawn) has no row in the spec's §12 Decisions log. Add it in the
+  Claude Doc and re-export; never hand-edit `SPEC.md`.
+- From P0-09: `open_repo` does not honour `GIT_CEILING_DIRECTORIES`, git's
+  stop at file-system boundaries, `core.worktree` (bare dotfiles repos) or
+  `safe.directory`. A repository owned by another user opens, and every git
+  call then fails with "dubious ownership". Surface that error with the fix
+  (`git config --global --add safe.directory`, which the app must not run
+  itself). Owner: P0-12; the rest unassigned.
+- From P0-09: `open_repo` is synchronous and walks the tree with `stat` calls
+  and small reads, so it can block an async worker on a network drive.
+  Decide in P0-12 whether to call it through `spawn_blocking` (see the P0-17
+  blocking-pool item). Owner: P0-12.
+- From P0-09: the actor awaits a running write without polling anything
+  else, so a watcher event that arrives mid-write must be buffered outside
+  the actor loop, not dropped. Owner: P0-10.
+- From P0-09: a write holds back every read submitted after it. Once
+  `fetch`/`pull`/`push` exist, a long network write would freeze status and
+  diffs. Decide whether network phases run outside the actor, with only the
+  ref update serialised. Owner: P1-09.
