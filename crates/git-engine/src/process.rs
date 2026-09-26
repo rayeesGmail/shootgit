@@ -149,6 +149,8 @@ pub struct ProcessCommand {
     program: PathBuf,
     args: Vec<OsString>,
     envs: Vec<(OsString, OsString)>,
+    /// Inherited variables the child must not see; see `env_remove`.
+    env_removals: Vec<OsString>,
     current_dir: Option<PathBuf>,
     timeout: Option<Duration>,
     cancel: Option<CancellationToken>,
@@ -164,6 +166,7 @@ impl ProcessCommand {
             program: program.into(),
             args: Vec::new(),
             envs: Vec::new(),
+            env_removals: Vec::new(),
             current_dir: None,
             timeout: Some(DEFAULT_TIMEOUT),
             cancel: None,
@@ -195,6 +198,13 @@ impl ProcessCommand {
     pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
         self.envs
             .push((key.as_ref().to_owned(), value.as_ref().to_owned()));
+        self
+    }
+
+    /// Keeps `key` out of the environment the child inherits. A value set
+    /// with [`env`](Self::env) still applies, whichever call comes first.
+    pub(crate) fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
+        self.env_removals.push(key.as_ref().to_owned());
         self
     }
 
@@ -230,6 +240,9 @@ impl ProcessCommand {
             .kill_on_drop(true);
         if let Some(path) = login_shell_path() {
             command.env("PATH", path);
+        }
+        for key in &self.env_removals {
+            command.env_remove(key);
         }
         for (key, value) in &self.envs {
             command.env(key, value);
@@ -360,7 +373,9 @@ async fn read_pipe<R: AsyncRead + Unpin>(pipe: Option<&mut R>) -> std::io::Resul
 ///
 /// The spawned command line is
 /// `git --no-optional-locks -c core.quotepath=off [-c key=value]... <args>`
-/// with `GIT_TERMINAL_PROMPT=0`, so git never blocks on a terminal prompt.
+/// with `GIT_TERMINAL_PROMPT=0`, so git never blocks on a terminal prompt,
+/// and without the repository-local variables in [`LOCAL_REPO_ENV`] that
+/// this process may have inherited (ADR 0007).
 ///
 /// Every run takes a slot from the shared [`Limiter`] (or the one given to
 /// [`limiter`](Self::limiter)) in the lane chosen by
@@ -386,6 +401,36 @@ pub struct GitCommand {
 
 /// Flags every git spawn gets, before any per-spawn `-c`.
 const FIXED_GIT_ARGS: [&str; 3] = ["--no-optional-locks", "-c", "core.quotepath=off"];
+
+/// Git's repository-local environment variables: what
+/// `git rev-parse --local-env-vars` lists (`local_repo_env` in git's
+/// `environment.c`) in git 2.39, which still has `GIT_INTERNAL_SUPER_PREFIX`
+/// (dropped in 2.40).
+///
+/// Every git spawn clears the values this process inherited (ADR 0007). The
+/// app is started from a git hook, or from a shell that exported `GIT_DIR`,
+/// often enough; passed on, these would point git at another repository,
+/// index or object store than the working tree it runs in. Git clears the
+/// same list itself before it runs a command in a submodule. A value set on
+/// the command with [`GitCommand::env`] still applies.
+pub const LOCAL_REPO_ENV: [&str; 16] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
 
 impl GitCommand {
     /// A git command using the executable at `git` (normally
@@ -426,7 +471,9 @@ impl GitCommand {
     }
 
     /// Sets an environment variable for this spawn. `GIT_TERMINAL_PROMPT`
-    /// is always `0` and cannot be overridden.
+    /// is always `0` and cannot be overridden. A variable from
+    /// [`LOCAL_REPO_ENV`] set here is passed on, though an inherited one is
+    /// not.
     pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
         self.process.env(key, value);
         self
@@ -492,6 +539,9 @@ impl GitCommand {
         process
             .args(self.full_args())
             .env("GIT_TERMINAL_PROMPT", "0");
+        for key in LOCAL_REPO_ENV {
+            process.env_remove(key);
+        }
         process.counts_as_git = true;
         process
     }
@@ -776,6 +826,69 @@ mod tests {
             "printf '%s\\0' \"$(git config shootgit.probe)\" \"$GIT_ASKPASS\" \"$SSH_ASKPASS\" \"$SHOOTGIT_EXTRA\"",
         );
         assert_eq!(got, ["a b=c", "/opt/askpass one", "/opt/askpass two", "x"]);
+    }
+
+    /// The environment changes a spawn of `git` makes: `None` removes the
+    /// variable.
+    fn env_changes(git: &GitCommand) -> Vec<(String, Option<String>)> {
+        git.process()
+            .build()
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn git_command_clears_inherited_repository_env() {
+        let changes = env_changes(&GitCommand::new("git"));
+
+        for name in LOCAL_REPO_ENV {
+            assert!(
+                changes.contains(&(name.to_owned(), None)),
+                "{name} is not cleared: {changes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_command_env_set_by_the_caller_survives_the_clearing() {
+        // P6-01 commits a changelist through a temporary index.
+        let mut git = GitCommand::new("git");
+        git.env("GIT_INDEX_FILE", "/tmp/changelist-index");
+
+        let changes = env_changes(&git);
+
+        assert!(
+            changes.contains(&(
+                "GIT_INDEX_FILE".to_owned(),
+                Some("/tmp/changelist-index".to_owned())
+            )),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn cleared_env_covers_what_this_git_calls_repository_local() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let output = std::process::Command::new(machine_git())
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        let listed = String::from_utf8(output.stdout).unwrap();
+        for name in listed.lines() {
+            assert!(
+                LOCAL_REPO_ENV.contains(&name),
+                "git {name} is repository-local but GitCommand does not clear it"
+            );
+        }
     }
 
     #[test]
