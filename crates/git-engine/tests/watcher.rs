@@ -588,3 +588,103 @@ async fn events_during_a_write_are_buffered_outside_the_actor() {
     assert_eq!(external.worktree_status, FileStatus::Untracked);
     drop(watcher);
 }
+
+// ---- owned by the actor (P0-12, SPEC §4 "owns the watcher") -----------------
+
+/// Every write the actor runs is bracketed with `begin_write`, and the write
+/// ends with its post-write status snapshot, so the write's own changes
+/// produce no event (§5 rule 2). Changes after it are reported.
+#[tokio::test]
+async fn a_watched_actor_suppresses_the_events_of_its_own_writes() {
+    let fixture = Fixture::new().await;
+    let repo = fixture.repo();
+    let (actor, mut events) = RepoActor::spawn_watched(repo.clone(), WatchOptions::default())
+        .await
+        .unwrap();
+    settle(&mut events).await;
+    assert_eq!(actor.id(), repo.id());
+    let watcher = actor
+        .watcher()
+        .expect("a watched actor has a watcher")
+        .clone();
+    assert_eq!(watcher.generation(), 0);
+
+    let snapshot = actor
+        .write({
+            let path = fixture.workdir().join("written-by-us.txt");
+            move |repo| async move {
+                write(&path, "ours\n");
+                // Leave a slow backend time to deliver the write's events
+                // while the bracket is still open.
+                tokio::time::sleep(quiet()).await;
+                status(&repo, &StatusOptions::default(), &CancellationToken::new()).await
+            }
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.path == Path::new("written-by-us.txt")),
+        "the snapshot sees the write: {:#?}",
+        snapshot.entries
+    );
+    assert_quiet(&mut events, "the actor's own write").await;
+    assert!(
+        watcher.suppressed_events() >= 1,
+        "the backend saw nothing to suppress"
+    );
+    assert_eq!(watcher.generation(), 1);
+
+    // Reads are not bracketed, and the bracket closed with the write.
+    let _ = actor
+        .read(|repo| async move {
+            status(&repo, &StatusOptions::default(), &CancellationToken::new()).await
+        })
+        .await
+        .unwrap();
+    write(fixture.workdir().join("external.txt"), "theirs\n");
+    let changed = next(&mut events).await;
+    assert_eq!(changed.kinds, only(ChangeKind::Status), "{changed:?}");
+    assert_eq!(changed.generation, 1);
+}
+
+/// The watch lives exactly as long as the actor that owns it.
+#[tokio::test]
+async fn dropping_a_watched_actor_stops_its_watcher() {
+    let fixture = Fixture::new().await;
+    let (actor, mut events) = RepoActor::spawn_watched(fixture.repo(), WatchOptions::default())
+        .await
+        .unwrap();
+    let clone = actor.clone();
+    drop(actor);
+    // A clone keeps the actor, and with it the watch, alive.
+    settle(&mut events).await;
+    write(fixture.workdir().join("while-alive.txt"), "x\n");
+    assert!(next(&mut events).await.kinds.contains(ChangeKind::Status));
+
+    drop(clone);
+    let end = timeout(ARRIVAL, async {
+        loop {
+            match events.recv().await {
+                None => break,
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => panic!("the watcher failed: {error}"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        end.is_ok(),
+        "the event stream did not end within {ARRIVAL:?}"
+    );
+}
+
+/// An actor without a watcher is still what `spawn` gives: nothing is watched.
+#[tokio::test]
+async fn a_plain_actor_has_no_watcher() {
+    let actor = RepoActor::spawn(Repo::new("git", "no-such-repository"));
+    assert!(actor.watcher().is_none());
+}

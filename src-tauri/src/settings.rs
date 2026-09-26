@@ -16,7 +16,13 @@
 //!   cannot be parsed is moved aside to `settings.json.corrupt`, so the next
 //!   save does not destroy what the user may want to recover by hand, and
 //!   the app starts with defaults. A broken settings file must never stop the
-//!   app from opening.
+//!   app from opening, and neither does a config directory Tauri cannot
+//!   locate: then the settings live in memory for the session
+//!   ([`store_at`]).
+//!
+//! The file is JSON, whose strings are Unicode, so every path in it is valid
+//! UTF-8. A repository whose path is not (possible on Linux) opens but is
+//! not recorded as recent (ADR 0008).
 
 use std::ffi::OsString;
 use std::fs;
@@ -67,12 +73,18 @@ impl Settings {
     /// Moves `path` to the front of the recent list, adding it if it is new
     /// and dropping the oldest entry beyond [`MAX_RECENT_REPOS`].
     ///
+    /// A path that is not valid UTF-8 is left out: the file could not hold
+    /// it, and every later save would fail (ADR 0008).
+    ///
     /// Paths are compared exactly, so pass the canonical path that
     /// `git_engine::repo::open_repo` returns: otherwise one repository
     /// reached through a symlink, or spelled with different letter case on a
     /// case-insensitive file system, would take two places.
     pub fn record_recent_repo(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
+        if path.to_str().is_none() {
+            return;
+        }
         self.recent_repos.retain(|known| *known != path);
         self.recent_repos.insert(0, path);
         self.recent_repos.truncate(MAX_RECENT_REPOS);
@@ -184,6 +196,26 @@ fn parse(bytes: &[u8]) -> Result<Settings, serde_json::Error> {
     serde_json::from_value(serde_json::Value::Object(fields))
 }
 
+/// The store for the settings file at `path`, or, when there is no path
+/// because Tauri could not locate the config directory, a store that keeps
+/// the settings in memory for the session.
+///
+/// `run()` calls it with [`settings_path`]. Losing the settings of one
+/// session is better than an app that does not start, the same trade-off as
+/// a corrupt file.
+pub fn store_at(path: Result<PathBuf, SettingsError>) -> SettingsStore {
+    match path {
+        Ok(path) => SettingsStore::load(path),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "no config directory; settings are kept in memory and not saved",
+            );
+            SettingsStore::in_memory()
+        }
+    }
+}
+
 /// Writes `settings` to `path` atomically, creating the directory if needed.
 ///
 /// The JSON goes to a temporary file beside `path`, is flushed to disk, and
@@ -229,13 +261,15 @@ fn corrupt_copy_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The app's settings: the copy in memory and the file it is saved to.
+/// The app's settings: the copy in memory and the file it is saved to, if
+/// any.
 ///
 /// Reads come from memory. Every change goes through [`SettingsStore::update`],
 /// which saves before the copy in memory changes, so the two never disagree.
 #[derive(Debug)]
 pub struct SettingsStore {
-    path: PathBuf,
+    /// `None` for [`SettingsStore::in_memory`].
+    path: Option<PathBuf>,
     current: Mutex<Settings>,
 }
 
@@ -245,14 +279,24 @@ impl SettingsStore {
     pub fn load(path: PathBuf) -> Self {
         let settings = load(&path);
         Self {
-            path,
+            path: Some(path),
             current: Mutex::new(settings),
         }
     }
 
-    /// The file this store saves to.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// A store with the default settings that saves nothing: updates apply
+    /// for the session only (see [`store_at`]).
+    pub fn in_memory() -> Self {
+        Self {
+            path: None,
+            current: Mutex::new(Settings::default()),
+        }
+    }
+
+    /// The file this store saves to; `None` when it keeps the settings in
+    /// memory only.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// A copy of the current settings.
@@ -264,14 +308,17 @@ impl SettingsStore {
     ///
     /// Updates are serialised. If saving fails, the error is returned and
     /// the settings stay as they were, in memory and on disk. A change that
-    /// leaves the settings equal to what they were writes nothing. Blocking,
-    /// like [`save`]: call it off the main thread.
+    /// leaves the settings equal to what they were writes nothing, and an
+    /// in-memory store never writes. Blocking, like [`save`]: call it off the
+    /// main thread (the app's commands use `spawn_blocking`).
     pub fn update(&self, change: impl FnOnce(&mut Settings)) -> Result<Settings, SettingsError> {
         let mut current = self.lock();
         let mut next = current.clone();
         change(&mut next);
         if next != *current {
-            save(&self.path, &next)?;
+            if let Some(path) = &self.path {
+                save(path, &next)?;
+            }
             *current = next.clone();
         }
         Ok(next)

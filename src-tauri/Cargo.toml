@@ -27,12 +27,20 @@ serde_json = { workspace = true }
 specta = { workspace = true }
 specta-typescript = { workspace = true }
 tauri = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
 tauri-specta = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+# `tokio::sync::Mutex` for state held across an `await` (the open lock, the
+# resolved git). Tasks themselves run on the runtime handed to Tauri.
+tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Canonical paths, as the app reports them, in tests/repos.rs.
+dunce = { workspace = true }
+# A watcher failure to feed the event forwarder in unit tests.
+notify = { workspace = true }
 # `tauri::test` (mock runtime, `get_ipc_response`) drives commands over the real
 # IPC bridge without a window. Feature unification keeps this out of the app.
 tauri = { workspace = true, features = ["test"] }

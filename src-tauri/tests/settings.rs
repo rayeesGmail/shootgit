@@ -62,7 +62,7 @@ fn the_store_keeps_updates_across_a_restart() {
     let path = settings_file(&dir);
 
     let store = SettingsStore::load(path.clone());
-    assert_eq!(store.path(), path);
+    assert_eq!(store.path(), Some(path.as_path()));
     assert_eq!(store.get(), Settings::default());
 
     let updated = store
@@ -323,4 +323,56 @@ fn the_settings_file_lives_in_the_app_config_dir() {
     let expected = app.path().app_config_dir().unwrap().join("settings.json");
 
     assert_eq!(settings::settings_path(app.handle()).unwrap(), expected);
+}
+
+// ---- P0-12: the app's use of the store -------------------------------------
+
+/// JSON strings are Unicode, so a path that is not (possible on Linux) cannot
+/// be saved; recording it would make every later save fail. Such a repository
+/// still opens, it is just not remembered (ADR 0008).
+#[cfg(unix)]
+#[test]
+fn a_path_that_is_not_utf8_is_not_recorded_as_recent() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut settings = Settings::default();
+    settings.record_recent_repo("/work/fine");
+
+    settings.record_recent_repo(PathBuf::from(OsStr::from_bytes(b"/work/caf\xe9")));
+
+    assert_eq!(settings.recent_repos(), [PathBuf::from("/work/fine")]);
+    let dir = tempfile::tempdir().unwrap();
+    settings::save(&settings_file(&dir), &settings).unwrap();
+}
+
+/// When Tauri cannot say where the config directory is (no home directory,
+/// say), the app still starts: settings live in memory for the session.
+#[test]
+fn without_a_config_dir_the_store_keeps_settings_in_memory() {
+    let store = settings::store_at(Err(settings::SettingsError::ConfigDir(
+        tauri::Error::UnknownPath,
+    )));
+
+    assert_eq!(store.path(), None);
+    assert_eq!(store.get(), Settings::default());
+    let updated = store
+        .update(|settings| {
+            settings.record_recent_repo("/work/a");
+        })
+        .unwrap();
+    assert_eq!(updated.recent_repos(), [PathBuf::from("/work/a")]);
+    assert_eq!(store.get(), updated);
+}
+
+#[test]
+fn with_a_config_dir_the_store_loads_from_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_file(&dir);
+    settings::save(&path, &sample()).unwrap();
+
+    let store = settings::store_at(Ok(path.clone()));
+
+    assert_eq!(store.path(), Some(path.as_path()));
+    assert_eq!(store.get(), sample());
 }

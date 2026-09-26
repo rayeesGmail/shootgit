@@ -16,6 +16,11 @@
   --color-text: #1b1b1f;
   --color-text-muted: #5c5f66;
   --color-border: #d8d8de;
+  --color-accent: #2f5fd0;
+  --color-error-surface: #fdecec;
+  --color-error-border: #e2a3a3;
+  --color-warning-surface: #fdf5e2;
+  --color-warning-border: #e3c77a;
 
   --font-ui:
     system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Ubuntu,
@@ -39,6 +44,11 @@
     --color-text: #ececf1;
     --color-text-muted: #a0a0aa;
     --color-border: #3a3a41;
+    --color-accent: #7ea2f2;
+    --color-error-surface: #3a2224;
+    --color-error-border: #7a3a3f;
+    --color-warning-surface: #3a3222;
+    --color-warning-border: #7a6532;
   }
 }
 
@@ -71,20 +81,46 @@ body {
   height: 100%;
 }
 
+/* The Phase 0 window (P0-12): a bar with "Open repository", notices, and
+   either the recent list or the raw status of the open repository. The real
+   shell is P1-13. */
 .app {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  align-items: center;
-  justify-content: center;
+  gap: var(--space-3);
   height: 100%;
   padding: var(--space-4);
 }
 
+.app__bar {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
 .app__title {
-  margin: 0;
+  margin: 0 var(--space-2) 0 0;
   font-size: var(--font-size-title);
   font-weight: 600;
+}
+
+.app__action {
+  font: inherit;
+  color: var(--color-text);
+  background-color: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: var(--space-1) var(--space-3);
+}
+
+.app__action:disabled {
+  color: var(--color-text-muted);
+}
+
+.app__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 
 .app__hint {
@@ -92,12 +128,129 @@ body {
   color: var(--color-text-muted);
 }
 
-/* Whether the Rust side answered `ping` (P0-04). P0-12 replaces it with the
-   real repository state. */
-.app__status {
+/* Error and warning notices, with the command that fixes them. */
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid;
+  border-radius: 6px;
+}
+
+.notice--error {
+  background-color: var(--color-error-surface);
+  border-color: var(--color-error-border);
+}
+
+.notice--warning {
+  background-color: var(--color-warning-surface);
+  border-color: var(--color-warning-border);
+}
+
+.notice__message,
+.notice__fix {
   margin: 0;
-  color: var(--color-text-muted);
+}
+
+/* The fix is meant to be copied into a terminal. */
+.notice__command {
   font-family: var(--font-mono);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.notice__dismiss {
+  align-self: flex-start;
+  font: inherit;
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.recent__title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-body);
+  font-weight: 600;
+}
+
+.recent__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent__item {
+  font: inherit;
+  font-family: var(--font-mono);
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  padding: var(--space-1) 0;
+  text-align: start;
+}
+
+/* The open repository: path, HEAD, and the raw status list, which scrolls on
+   its own while the bar stays put. */
+.repo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  flex: 1;
+}
+
+.repo__path,
+.repo__head {
+  margin: 0;
+  font-family: var(--font-mono);
+}
+
+.repo__head {
+  color: var(--color-text-muted);
+}
+
+.repo__upstream {
+  margin-inline-start: var(--space-3);
+}
+
+.status-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  list-style: none;
+  font-family: var(--font-mono);
+  background-color: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.status-list__row {
+  display: flex;
+  gap: var(--space-2);
+  white-space: pre;
+}
+
+.status-list__code {
+  flex: none;
+  width: 2ch;
+}
+
+.status-list__old,
+.status-list__flag,
+.status-list__clean,
+.status-list__more {
+  color: var(--color-text-muted);
+}
+
+.status-list__clean,
+.status-list__more {
+  margin: var(--space-2) 0 0;
 }
 
 /* SPEC §6 / §4: honour reduced motion; nothing animates on a scroll path. */

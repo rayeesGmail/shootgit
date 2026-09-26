@@ -57,6 +57,17 @@ pub enum GitError {
     /// and so does [`open_repo`](crate::repo::open_repo).
     #[error("invalid .git file {}: {reason}", path.display())]
     InvalidGitFile { path: PathBuf, reason: String },
+    /// git refused to work in the repository at `path` because another user
+    /// owns it and the user's git config does not list it in
+    /// `safe.directory` (CVE-2022-24765). The message names the command that
+    /// trusts it, [`safe_directory_command`](crate::repo::safe_directory_command);
+    /// the engine never runs it.
+    #[error(
+        "git refuses to work in {} because another user owns it. If you trust it, run: {}",
+        path.display(),
+        crate::repo::safe_directory_command(path)
+    )]
+    DubiousOwnership { path: PathBuf },
     /// A file-system operation on `path` failed.
     #[error("could not access {}", path.display())]
     Io {

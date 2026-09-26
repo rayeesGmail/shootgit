@@ -1,20 +1,30 @@
 //! Tauri shell for the app (SPEC §4: commands go down, events come up).
 //!
 //! Phase 0 opens one window; the frontend lives in `packages/ui` and reaches
-//! this crate only through the commands in [`commands`], whose TypeScript
-//! signatures are generated from [`ipc::builder`]. What the app remembers
-//! between launches lives in [`settings`].
+//! this crate only through the commands in [`commands`] and the events in
+//! [`events`], whose TypeScript types are generated from [`ipc::builder`].
+//! The open repositories live in [`repos`]; what the app remembers between
+//! launches lives in [`settings`].
 //!
 //! The product name is still an open question (SPEC §12), so
 //! `tauri.conf.json` carries the placeholder `Shootgit` as `productName` and
 //! window title, and `dev.placeholder.shootgit` as the bundle identifier.
 
 pub mod commands;
+pub mod events;
+pub mod git;
 pub mod ipc;
+pub mod repos;
 pub mod settings;
 
+use std::sync::Arc;
+
 use tauri::async_runtime::TokioRuntime;
-use tauri::Manager;
+use tauri::{App, Manager, Runtime};
+use tauri_specta::Event as _;
+
+use crate::repos::{EventSink, RepoEvent, Repos};
+use crate::settings::SettingsStore;
 
 /// Builds the app's single tokio runtime and makes it Tauri's (SPEC §4
 /// Low-resource operation, ADR 0004).
@@ -56,15 +66,50 @@ pub fn run() -> Result<(), tauri::Error> {
     // build never touches the source tree.
     let specta = ipc::builder();
     tauri::Builder::default()
+        // The native folder picker behind "Open repository"; the frontend
+        // may only call its `open` (capabilities/default.json).
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(specta.invoke_handler())
-        .setup(|app| {
+        .setup(move |app| {
             // Settings are part of the startup diet (SPEC §4 Low-resource
-            // operation, rule 9): one small read, and loading never fails on
-            // a missing or corrupt file. Commands reach the store through
-            // `tauri::State<'_, settings::SettingsStore>`.
-            let store = settings::SettingsStore::load(settings::settings_path(app.handle())?);
-            app.manage(store);
+            // operation, rule 9): one small read. Loading never fails: a
+            // missing or corrupt file gives the defaults, and a config
+            // directory Tauri cannot locate keeps them in memory.
+            let settings = settings::store_at(settings::settings_path(app.handle()));
+            install(app, &specta, settings);
             Ok(())
         })
         .run(tauri::generate_context!())
+}
+
+/// Puts the app's state in place and mounts its typed events: what `run()`
+/// does in `setup`, and what the tests do to get the same app.
+///
+/// Commands reach the settings through `tauri::State<'_, Arc<SettingsStore>>`
+/// and the open repositories through `tauri::State<'_, Repos>`, whose events
+/// are emitted as the typed events of [`events`]. Nothing here spawns or
+/// reads anything; git is resolved when the first repository is opened.
+pub fn install<R: Runtime>(
+    app: &App<R>,
+    specta: &tauri_specta::Builder<R>,
+    settings: SettingsStore,
+) {
+    // Before anything can emit: tauri-specta panics on an event it has not
+    // mounted.
+    specta.mount_events(app);
+
+    let handle = app.handle().clone();
+    let sink: EventSink = Arc::new(move |event| {
+        let emitted = match &event {
+            RepoEvent::Changed(changed) => changed.emit(&handle),
+            RepoEvent::WatchFailed(failed) => failed.emit(&handle),
+        };
+        if let Err(error) = emitted {
+            tracing::warn!(%error, ?event, "could not emit a repository event");
+        }
+    });
+
+    let settings = Arc::new(settings);
+    app.manage(Arc::clone(&settings));
+    app.manage(Repos::new(settings, sink));
 }

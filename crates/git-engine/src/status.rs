@@ -10,12 +10,24 @@
 //! `-z` every record ends in NUL and paths are printed verbatim, with no
 //! quoting, so spaces and even newlines belong to the path. A rename or copy
 //! is the one entry that spans two records: the new path, then the old one.
+//!
+//! # Across IPC
+//!
+//! These are SPEC §5 Core models, "serde, shared with TS via specta": the app
+//! sends [`Status`] to the frontend as is, and `packages/ipc-types` describes
+//! it. Field names stay snake_case as §5 spells them, [`Head`] is tagged by
+//! `kind`, and [`FileStatus`] is a snake_case name. Paths are sent as strings,
+//! lossily: a path that is not valid UTF-8 (possible on Linux) has each bad
+//! sequence replaced by U+FFFD, so it can be shown but not sent back to name
+//! the file (ADR 0008).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use serde::{Serialize, Serializer};
 
 use crate::error::GitError;
 use crate::process::{split_nul, CancellationToken};
-use crate::repo::Repo;
+use crate::repo::{classify_failure, Repo, RepoId};
 
 /// The command §5 gives for Status.
 const STATUS_ARGS: [&str; 5] = [
@@ -36,22 +48,25 @@ pub struct StatusOptions {
 }
 
 /// What one `git status` run reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct Status {
     pub repo: RepoInfo,
     /// In the order git printed them.
     pub entries: Vec<StatusEntry>,
 }
 
-/// The repository half of §5 `RepoInfo`, from the `# branch.*` headers.
+/// §5 `RepoInfo`: which repository handle this is, and the `# branch.*`
+/// headers.
 ///
-/// Two §5 fields are not here yet: `id`, which names an open repository and
-/// comes with the open-repository plumbing (P0-09, P0-12), and `state`
-/// (merging, rebasing, ...), which porcelain v2 does not report and P2-11
-/// reads from the markers in `.git`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One §5 field is not here yet: `state` (merging, rebasing, ...), which
+/// porcelain v2 does not report and P2-11 reads from the markers in `.git`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct RepoInfo {
+    /// The [`Repo`] the status was read from ([`Repo::id`]).
+    pub id: RepoId,
     /// The root of the working tree, as the [`Repo`] names it.
+    #[serde(serialize_with = "lossy_path")]
+    #[specta(type = String)]
     pub path: PathBuf,
     pub head: Head,
     /// The upstream branch, such as `origin/main`, when one is configured.
@@ -63,8 +78,10 @@ pub struct RepoInfo {
 
 /// Where HEAD points.
 ///
-/// Branch names are converted to UTF-8 lossily; commit ids are hex.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Branch names are converted to UTF-8 lossily; commit ids are hex. On the
+/// wire it is tagged by `kind`: `{ "kind": "branch", "name": .., "oid": .. }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Head {
     /// On a branch that has commits.
     Branch { name: String, oid: String },
@@ -76,7 +93,7 @@ pub enum Head {
 }
 
 /// Commit counts between HEAD and its upstream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
 pub struct AheadBehind {
     /// Commits on HEAD that the upstream lacks.
     pub ahead: u32,
@@ -89,7 +106,8 @@ pub struct AheadBehind {
 /// `path` and `old_path` are relative to the root of the working tree and
 /// `/`-separated, exactly as git prints them. On Unix they are git's bytes,
 /// which need not be UTF-8; on Windows git prints UTF-8, and any invalid
-/// sequence is replaced. An ignored directory keeps its trailing `/`.
+/// sequence is replaced. An ignored directory keeps its trailing `/`. Across
+/// IPC both are lossy strings (see the module docs).
 ///
 /// `index_status` and `worktree_status` are the two letters of git's `XY`
 /// code:
@@ -102,10 +120,14 @@ pub struct AheadBehind {
 ///   porcelain v1's `??` and `!!`.
 ///
 /// §5 also lists `changelist_id`; it arrives with changelists (P6-01).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct StatusEntry {
+    #[serde(serialize_with = "lossy_path")]
+    #[specta(type = String)]
     pub path: PathBuf,
     /// Where a renamed or copied path came from.
+    #[serde(serialize_with = "lossy_optional_path")]
+    #[specta(type = Option<String>)]
     pub old_path: Option<PathBuf>,
     pub index_status: FileStatus,
     pub worktree_status: FileStatus,
@@ -116,8 +138,10 @@ pub struct StatusEntry {
     pub is_submodule: bool,
 }
 
-/// One letter of git's `XY` status code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// One letter of git's `XY` status code. On the wire it is the variant's
+/// snake_case name (`"type_changed"`), not git's letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
 pub enum FileStatus {
     /// `.`
     Unmodified,
@@ -162,31 +186,41 @@ impl FileStatus {
 ///
 /// Cancelling `cancel` stops the read, whether it is queued for a git slot or
 /// running, with [`GitError::Cancelled`]; a newer status request cancels the
-/// one in flight this way (§4 Low-resource operation, rule 4). A `repo` that
-/// is not a working tree fails with [`GitError::Failed`].
+/// one in flight this way (§4 Low-resource operation, rule 4). A repository
+/// git refuses to work in because another user owns it fails with
+/// [`GitError::DubiousOwnership`]; any other `repo` that is not a working
+/// tree fails with [`GitError::Failed`].
+///
+/// Status is normally the first git command run in a repository the user
+/// opened, so it is the one that recognises the ownership refusal: its
+/// spawn forces the C locale (ADR 0009).
 pub async fn status(
     repo: &Repo,
     options: &StatusOptions,
     cancel: &CancellationToken,
 ) -> Result<Status, GitError> {
-    let mut git = repo.git_command();
+    let mut git = repo.classified_git_command();
     git.args(STATUS_ARGS).cancel_token(cancel.clone());
     if options.include_ignored {
         git.arg("--ignored=matching");
     }
-    let output = git.output().await?;
-    parse(&output.stdout, repo.workdir().to_path_buf())
+    let output = git
+        .output()
+        .await
+        .map_err(|error| classify_failure(repo, error))?;
+    parse(&output.stdout, repo.id(), repo.workdir().to_path_buf())
 }
 
-/// Parses the output of [`STATUS_ARGS`] run in the working tree at `path`.
-fn parse(output: &[u8], path: PathBuf) -> Result<Status, GitError> {
-    parse_records(output, path).map_err(|reason| GitError::UnexpectedOutput {
+/// Parses the output of [`STATUS_ARGS`] run in the working tree at `path`,
+/// for the repository handle `id`.
+fn parse(output: &[u8], id: RepoId, path: PathBuf) -> Result<Status, GitError> {
+    parse_records(output, id, path).map_err(|reason| GitError::UnexpectedOutput {
         command: "status",
         reason,
     })
 }
 
-fn parse_records(output: &[u8], path: PathBuf) -> Result<Status, String> {
+fn parse_records(output: &[u8], id: RepoId, path: PathBuf) -> Result<Status, String> {
     let mut branch = BranchHeaders::default();
     let mut entries = Vec::new();
     let mut records = split_nul(output);
@@ -211,7 +245,7 @@ fn parse_records(output: &[u8], path: PathBuf) -> Result<Status, String> {
         entries.push(entry);
     }
     Ok(Status {
-        repo: branch.into_repo_info(path)?,
+        repo: branch.into_repo_info(id, path)?,
         entries,
     })
 }
@@ -250,7 +284,7 @@ impl BranchHeaders {
         Ok(())
     }
 
-    fn into_repo_info(self, path: PathBuf) -> Result<RepoInfo, String> {
+    fn into_repo_info(self, id: RepoId, path: PathBuf) -> Result<RepoInfo, String> {
         let (Some(oid), Some(name)) = (self.oid, self.head) else {
             return Err("missing `# branch.oid` or `# branch.head` header".to_owned());
         };
@@ -266,6 +300,7 @@ impl BranchHeaders {
             _ => Head::Branch { name, oid },
         };
         Ok(RepoInfo {
+            id,
             path,
             head,
             upstream: self.upstream,
@@ -396,6 +431,23 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Serialises a path as a string, replacing what is not valid Unicode with
+/// U+FFFD where serde's own `Path` impl would fail (ADR 0008).
+fn lossy_path<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.to_string_lossy())
+}
+
+/// [`lossy_path`] for an optional path; `None` is `null`.
+fn lossy_optional_path<S: Serializer>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match path {
+        Some(path) => lossy_path(path, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 /// `problem`, followed by the record it was found in.
 fn describe(record: &[u8], problem: &str) -> String {
     format!("{problem} in {:?}", String::from_utf8_lossy(record))
@@ -431,12 +483,14 @@ mod tests {
         z(&records)
     }
 
+    const ID: RepoId = RepoId::for_tests(7);
+
     fn parse_ok(output: &[u8]) -> Status {
-        parse(output, PathBuf::from("/repo")).unwrap()
+        parse(output, ID, PathBuf::from("/repo")).unwrap()
     }
 
     fn assert_unexpected(output: &[u8]) {
-        match parse(output, PathBuf::from("/repo")) {
+        match parse(output, ID, PathBuf::from("/repo")) {
             Err(GitError::UnexpectedOutput {
                 command: "status", ..
             }) => {}
@@ -474,6 +528,7 @@ mod tests {
         assert_eq!(
             status.repo,
             RepoInfo {
+                id: ID,
                 path: PathBuf::from("/repo"),
                 head: Head::Branch {
                     name: "feature/x".to_owned(),
@@ -723,6 +778,86 @@ mod tests {
                 .as_ref()
                 .map(|p| p.as_os_str().as_bytes()),
             Some(&b"old-\xff"[..])
+        );
+    }
+
+    // ---- serialisation for IPC (P0-12) ---------------------------------------
+
+    /// serde refuses a path that is not valid UTF-8, which would fail the
+    /// whole `get_status` reply. Paths cross IPC lossily instead (ADR 0008).
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_serialises_lossily() {
+        let mut records: Vec<Vec<u8>> = vec![
+            format!("# branch.oid {OID}").into_bytes(),
+            b"# branch.head main".to_vec(),
+            format!("2 R. N... 100644 100644 100644 {H1} {H1} R100 caf").into_bytes(),
+            b"old-\xff".to_vec(),
+        ];
+        records[2].push(0xe9);
+        let status = parse_ok(&z(&records));
+
+        let json = serde_json::to_value(&status.entries[0]).unwrap();
+
+        assert_eq!(json["path"], "caf\u{fffd}");
+        assert_eq!(json["old_path"], "old-\u{fffd}");
+    }
+
+    #[test]
+    fn heads_are_tagged_by_kind() {
+        let json = |head: Head| serde_json::to_value(head).unwrap();
+        assert_eq!(
+            json(Head::Branch {
+                name: "main".to_owned(),
+                oid: OID.to_owned()
+            }),
+            serde_json::json!({ "kind": "branch", "name": "main", "oid": OID })
+        );
+        assert_eq!(
+            json(Head::Unborn {
+                name: "main".to_owned()
+            }),
+            serde_json::json!({ "kind": "unborn", "name": "main" })
+        );
+        assert_eq!(
+            json(Head::Detached {
+                oid: OID.to_owned()
+            }),
+            serde_json::json!({ "kind": "detached", "oid": OID })
+        );
+    }
+
+    #[test]
+    fn file_statuses_serialise_as_snake_case_names() {
+        let names: Vec<serde_json::Value> = [
+            FileStatus::Unmodified,
+            FileStatus::Modified,
+            FileStatus::TypeChanged,
+            FileStatus::Added,
+            FileStatus::Deleted,
+            FileStatus::Renamed,
+            FileStatus::Copied,
+            FileStatus::Unmerged,
+            FileStatus::Untracked,
+            FileStatus::Ignored,
+        ]
+        .into_iter()
+        .map(|status| serde_json::to_value(status).unwrap())
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "unmodified",
+                "modified",
+                "type_changed",
+                "added",
+                "deleted",
+                "renamed",
+                "copied",
+                "unmerged",
+                "untracked",
+                "ignored"
+            ]
         );
     }
 

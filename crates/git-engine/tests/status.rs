@@ -332,3 +332,58 @@ async fn a_cancelled_status_returns_cancelled() {
 
     assert!(matches!(err, GitError::Cancelled), "{err:?}");
 }
+
+// ---- the IPC shape (P0-12) ---------------------------------------------------
+
+#[tokio::test]
+async fn repo_info_carries_the_id_of_the_repository_handle() {
+    let (_dir, repo, status) = basic_status(StatusOptions::default()).await;
+
+    assert_eq!(status.repo.id, repo.id());
+}
+
+/// SPEC §5 Core models are "serde, shared with TS via specta": the JSON
+/// here is what the frontend receives from `get_status`, so its field names
+/// and tags are the contract `packages/ipc-types/bindings.ts` describes.
+#[tokio::test]
+async fn status_serialises_to_the_shape_the_frontend_reads() {
+    let (_dir, repo, status) = basic_status(StatusOptions::default()).await;
+
+    let json = serde_json::to_value(&status).unwrap();
+
+    let info = &json["repo"];
+    assert_eq!(info["id"], serde_json::json!(repo.id()));
+    assert_eq!(info["path"], repo.workdir().to_str().unwrap());
+    assert_eq!(info["head"]["kind"], "branch");
+    assert_eq!(info["head"]["name"], "main");
+    assert!(info["head"]["oid"].is_string());
+    assert_eq!(info["upstream"], "origin/main");
+    assert_eq!(
+        info["ahead_behind"],
+        serde_json::json!({ "ahead": 1, "behind": 1 })
+    );
+
+    let entries = json["entries"].as_array().unwrap();
+    let entry = |path: &str| {
+        entries
+            .iter()
+            .find(|e| e["path"] == path)
+            .unwrap_or_else(|| panic!("no {path:?} in {entries:#?}"))
+    };
+    assert_eq!(
+        entry("new name.txt"),
+        &serde_json::json!({
+            "path": "new name.txt",
+            "old_path": "old name.txt",
+            "index_status": "renamed",
+            "worktree_status": "unmodified",
+            "is_conflicted": false,
+            "is_submodule": false,
+        })
+    );
+    assert_eq!(entry("modified.txt")["old_path"], serde_json::Value::Null);
+    assert_eq!(entry("both-modified.txt")["index_status"], "unmerged");
+    assert_eq!(entry("both-modified.txt")["is_conflicted"], true);
+    assert_eq!(entry("untracked.txt")["worktree_status"], "untracked");
+    assert_eq!(entry("ünïcødé/日本語.txt")["old_path"], "café.txt");
+}

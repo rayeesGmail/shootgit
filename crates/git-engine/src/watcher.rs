@@ -56,10 +56,13 @@
 //!
 //! ```text
 //! let own = watcher.begin_write();
-//! actor.write(stage_files).await?;
-//! let status = actor.read(status).await?;   // the post-write snapshot
-//! drop(own);                                // events from here on are external
+//! stage_files(&repo).await?;
+//! let status = status(&repo).await?;   // the post-write snapshot
+//! drop(own);                           // events from here on are external
 //! ```
+//!
+//! A [`RepoActor`](crate::repo_actor::RepoActor) with a watcher does this for
+//! every write it runs; the write's operation ends with its snapshot.
 //!
 //! # Memory and threads
 //!
@@ -77,20 +80,26 @@
 //!
 //! # Relation to the actor
 //!
-//! The watcher runs beside the [`RepoActor`](crate::repo_actor::RepoActor),
-//! not inside it, so an event that arrives while the actor is inside a write
-//! is buffered here and the refresh it prompts queues behind that write. The
-//! app layer (P0-12) holds both per repository and turns [`RepoChanged`] into
-//! the `repo-changed` IPC event; the serde and specta derives arrive with it.
+//! A [`RepoActor`](crate::repo_actor::RepoActor) owns its repository's
+//! watcher (§4 Process model): [`RepoActor::spawn_watched`] starts both, and
+//! the actor brackets every write it runs with [`Watcher::begin_write`]. The
+//! coalescer still runs as a task of its own, outside the actor loop, so an
+//! event that arrives while the actor is inside a write is buffered here and
+//! the refresh it prompts queues behind that write. The app turns each
+//! [`RepoChanged`] into its `repo-changed` IPC event, adding the repository
+//! id; [`ChangeKinds`] crosses IPC as a list of [`ChangeKind`] names.
+//!
+//! [`RepoActor::spawn_watched`]: crate::repo_actor::RepoActor::spawn_watched
 //!
 //! # Not here yet
 //!
 //! The polling fallback for a failed watcher or an exhausted inotify watch
 //! limit (§5 rule 8): the watcher reports the failure as the last item of
 //! the stream, with [`WatchError::is_watch_limit`] naming the inotify case,
-//! and stops. On Linux, ignored directories are still watched (inotify
-//! needs a watch per directory), so a `node_modules/` can exhaust the limit;
-//! `core.fsmonitor` as the primary signal (§5 rule 7) is Phase 6 work.
+//! and stops; the app shows it as a warning. On Linux, ignored directories
+//! are still watched (inotify needs a watch per directory), so a
+//! `node_modules/` can exhaust the limit; `core.fsmonitor` as the primary
+//! signal (§5 rule 7) is Phase 6 work.
 
 use std::fmt;
 use std::fs;
@@ -102,6 +111,8 @@ use std::time::Duration;
 
 use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, ModifyKind, RemoveKind};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
+use serde::ser::SerializeSeq;
+use serde::{Serialize, Serializer};
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -148,8 +159,9 @@ impl Default for WatchOptions {
 
 /// What part of the repository changed, one per row of the §5 table, named
 /// as the `repo-changed` IPC event names them (§4: `status`, `refs`,
-/// `index`, `head`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// `index`, `head`). It serialises as [`ChangeKind::name`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     /// A working-tree file was saved, created, deleted or renamed: re-run
     /// status. Also set when the ignore rules change.
@@ -204,6 +216,9 @@ impl ChangeKind {
 }
 
 /// A set of [`ChangeKind`]s: one byte, so merging events costs nothing.
+///
+/// It serialises as the list of its kinds in [`ChangeKind::ALL`] order
+/// (`["status", "head"]`), and its specta type is that list.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ChangeKinds(u8);
 
@@ -251,6 +266,23 @@ impl fmt::Debug for ChangeKinds {
     }
 }
 
+impl Serialize for ChangeKinds {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for kind in self.iter() {
+            seq.serialize_element(&kind)?;
+        }
+        seq.end()
+    }
+}
+
+/// The wire shape is a list of kinds, so that is the type TypeScript sees.
+impl specta::Type for ChangeKinds {
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        <Vec<ChangeKind> as specta::Type>::definition(types)
+    }
+}
+
 impl From<ChangeKind> for ChangeKinds {
     fn from(kind: ChangeKind) -> Self {
         Self::of(kind)
@@ -288,7 +320,12 @@ impl Extend<ChangeKind> for ChangeKinds {
 }
 
 /// One coalescing window's worth of changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialisable for tools that print it (`git-engine-cli watch`, P0-13). It
+/// has no specta type on purpose: `generation` is a `u64`, which TypeScript
+/// numbers cannot hold exactly, and the app's `repo-changed` event carries
+/// the repository id and [`kinds`](Self::kinds) instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct RepoChanged {
     /// The union of what changed in the window; never empty.
     pub kinds: ChangeKinds,
@@ -1009,6 +1046,23 @@ mod tests {
         assert_eq!(
             ChangeKind::ALL.map(ChangeKind::name).join(","),
             "status,index,head,refs,state,reflog,config"
+        );
+    }
+
+    #[test]
+    fn change_kinds_cross_ipc_as_a_list_of_their_names() {
+        // §4: `repo-changed { repo_id, kinds: [status|refs|index|head] }`.
+        for kind in ChangeKind::ALL {
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.name());
+        }
+        let set = kinds([ChangeKind::Head, ChangeKind::Status, ChangeKind::Refs]);
+        assert_eq!(
+            serde_json::to_value(set).unwrap(),
+            serde_json::json!(["status", "head", "refs"])
+        );
+        assert_eq!(
+            serde_json::to_value(ChangeKinds::EMPTY).unwrap(),
+            serde_json::json!([])
         );
     }
 

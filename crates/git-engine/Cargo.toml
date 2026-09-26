@@ -10,6 +10,11 @@ publish.workspace = true
 dunce = { workspace = true }
 ignore = { workspace = true }
 notify = { workspace = true }
+# SPEC §5 Core models: "serde, shared with TS via specta". The models the app
+# sends over IPC (status, repo ids, change kinds) derive both; specta is a
+# plain type-description crate, so the engine stays free of Tauri (§4).
+serde = { workspace = true }
+specta = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "io-util",
@@ -35,6 +40,8 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# Asserts the JSON shape of the models that cross IPC.
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 # `test-util` pauses the clock, so ordering tests can wait until every task is
 # idle instead of sleeping for real (tests/repo_actor.rs).
