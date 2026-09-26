@@ -2,7 +2,8 @@
 //!
 //! Phase 0 opens one window; the frontend lives in `packages/ui` and reaches
 //! this crate only through the commands in [`commands`], whose TypeScript
-//! signatures are generated from [`ipc::builder`].
+//! signatures are generated from [`ipc::builder`]. What the app remembers
+//! between launches lives in [`settings`].
 //!
 //! The product name is still an open question (SPEC §12), so
 //! `tauri.conf.json` carries the placeholder `Shootgit` as `productName` and
@@ -10,8 +11,10 @@
 
 pub mod commands;
 pub mod ipc;
+pub mod settings;
 
 use tauri::async_runtime::TokioRuntime;
+use tauri::Manager;
 
 /// Builds the app's single tokio runtime and makes it Tauri's (SPEC §4
 /// Low-resource operation, ADR 0004).
@@ -54,5 +57,14 @@ pub fn run() -> Result<(), tauri::Error> {
     let specta = ipc::builder();
     tauri::Builder::default()
         .invoke_handler(specta.invoke_handler())
+        .setup(|app| {
+            // Settings are part of the startup diet (SPEC §4 Low-resource
+            // operation, rule 9): one small read, and loading never fails on
+            // a missing or corrupt file. Commands reach the store through
+            // `tauri::State<'_, settings::SettingsStore>`.
+            let store = settings::SettingsStore::load(settings::settings_path(app.handle())?);
+            app.manage(store);
+            Ok(())
+        })
         .run(tauri::generate_context!())
 }

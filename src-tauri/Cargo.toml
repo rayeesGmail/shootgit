@@ -19,18 +19,22 @@ tauri-build = { workspace = true }
 # The single tokio runtime the app runs on is built by git-engine's sizing
 # rule (§4 Low-resource operation) and handed to Tauri in `run()`.
 git-engine = { workspace = true }
+# settings.json (SPEC §4 Data at rest): serde for the file format, tempfile
+# for the temporary file each save writes beside it and renames over it.
+serde = { workspace = true }
+serde_json = { workspace = true }
 specta = { workspace = true }
 specta-typescript = { workspace = true }
 tauri = { workspace = true }
 tauri-specta = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-# Reading tauri.conf.json in tests the way Tauri reads it.
-serde_json = { workspace = true }
 # `tauri::test` (mock runtime, `get_ipc_response`) drives commands over the real
 # IPC bridge without a window. Feature unification keeps this out of the app.
 tauri = { workspace = true, features = ["test"] }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true
