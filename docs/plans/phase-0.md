@@ -36,10 +36,12 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 Gaps found while reviewing finished tasks. Each one names the task that should
 close it. When that task starts, move the item into its scope and delete it here.
 
-- From P0-02: `.gitattributes` protects only `bindings.ts`. Windows runners
-  check files out as CRLF, which will break the byte-exact fixture and golden
-  patch tests. Add `-text` or `eol` rules for `tests/golden/` and the fixture
-  inputs. Owner: P0-15, and it must land before P0-08 and P1-01.
+- From P0-02: `.gitattributes` has only narrow rules: `bindings.ts`,
+  `crates/*/tests/golden/**` (P0-17) and `scripts/fixtures/**` (P0-08).
+  Windows runners check files out as CRLF, which will break the byte-exact
+  fixture and golden patch tests. Add the general `-text` or `eol` rules for
+  golden files and fixture inputs. Owner: P0-15, and it must land before
+  P1-01.
 - From P0-02: Dependabot, `cargo audit` and `npm audit` (spec "Dependency
   audit") have no plan task. Add one.
 - From P0-02: the workflows are not linted. Run `actionlint` on `ci.yml`
@@ -111,3 +113,33 @@ close it. When that task starts, move the item into its scope and delete it here
   timeout; a tmux server started that way survives the kill). An unset or
   relative `$SHELL` also falls back; the shell is not read from `getpwuid`.
   Revisit if users report git not being found. Owner: unassigned.
+- From P0-08: the status models (`Status`, `RepoInfo`, `Head`,
+  `StatusEntry`, `FileStatus`) have no serde or specta derives. P0-12 needs
+  both and P0-13 needs `Serialize`. Paths are `PathBuf` holding git's raw
+  bytes on Unix, and serde fails on a path that is not UTF-8; decide how such
+  paths cross IPC. Owner: P0-12.
+- From P0-08: `RepoInfo` lacks the §5 fields `id` (Owner: P0-09 or P0-12)
+  and `state` (Owner: P2-11, from the markers in `.git`).
+- From P0-08: `status` always runs in the visible lane of the git limiter.
+  A repo that is not active must refresh in the background lane (§4
+  Low-resource operation). Add a priority option when that first happens.
+  Owner: unassigned.
+- From P0-08: status output is held in memory and parsed on an async worker
+  in one pass. Check it against the < 300 ms warm budget on the 50k-file
+  fixture. Owner: P1-12.
+- From P0-08: the `fixture()` helper lives in `tests/status.rs`. Move it to a
+  shared test-support module when a second test file builds fixtures.
+  Owner: P1-01.
+- From P0-08: the fixture test runs `bash` from `PATH`. CI uses Git Bash on
+  Windows, but a local run from PowerShell without Git's `usr\bin` on `PATH`
+  may get WSL's `bash.exe` or none. Document it in `CONTRIBUTING.md`.
+  Owner: P0-15.
+- From P0-08: two P0-05 tests with 300 ms probe timeouts
+  (`hanging_version_probe_times_out_and_the_candidate_is_skipped`,
+  `xcode_select_probe_reads_the_exit_status_and_times_out`) failed once under
+  a loaded full-workspace run on macOS and passed on rerun. Loosen their
+  timing before they flake in CI. Owner: unassigned.
+- From P0-08: `RUSTDOCFLAGS="-D warnings" cargo doc -p git-engine --no-deps`
+  fails on two redundant explicit link targets (`git_binary.rs:159`, `:177`).
+  CI does not run rustdoc. Fix them and add a doc check. Owner: P0-15, or any
+  later CI change.
