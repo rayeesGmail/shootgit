@@ -56,7 +56,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// The login-shell `PATH`, set once at startup (P0-07 resolves it on macOS).
+/// The login-shell `PATH`, set once at startup by
+/// [`login_shell::init`](crate::login_shell::init) on macOS.
 static LOGIN_SHELL_PATH: OnceLock<OsString> = OnceLock::new();
 
 /// Records the login-shell `PATH` that every spawn should use.
@@ -542,6 +543,35 @@ impl GitCommand {
     }
 }
 
+/// Runs `<git> <args>` verbatim, to probe a candidate binary during
+/// resolution (`git --version`).
+///
+/// Unlike [`GitCommand`] it adds no flags: `--no-optional-locks` would make a
+/// git older than 2.15 fail before it prints the version that tells the
+/// resolver it is too old. Like `GitCommand`, it takes a slot from
+/// [`Limiter::shared`] for the life of the process and counts in
+/// [`git_spawn_count`].
+pub(crate) async fn probe_git(
+    git: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<ProcessOutput, ProcessError> {
+    let never = CancellationToken::new();
+    let _slot = Limiter::shared()
+        .acquire(Priority::Visible, &never)
+        .await
+        .map_err(|Cancelled| ProcessError::Cancelled {
+            program: git.to_path_buf(),
+        })?;
+    let mut process = ProcessCommand::new(git);
+    process
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .timeout(Some(timeout));
+    process.counts_as_git = true;
+    process.output().await
+}
+
 /// Splits `-z` output into its NUL-terminated fields.
 ///
 /// git ends every field with NUL, including the last, so a single trailing
@@ -576,7 +606,9 @@ mod tests {
     }
 
     fn machine_git() -> PathBuf {
-        resolve(&ResolveOptions::from_env(None)).unwrap().path
+        block_on(resolve(&ResolveOptions::from_env(None)))
+            .unwrap()
+            .path
     }
 
     // ---- -z splitting ------------------------------------------------------
@@ -926,10 +958,11 @@ mod tests {
     #[test]
     fn git_command_counts_exactly_one_spawn_per_run() {
         let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let git_before = git_spawn_count();
-        let total_before = spawn_count();
+        // Resolving git spawns too, so it happens before the counts are read.
         let mut git = GitCommand::new(machine_git());
         git.arg("--version");
+        let git_before = git_spawn_count();
+        let total_before = spawn_count();
 
         block_on(git.output()).unwrap();
 

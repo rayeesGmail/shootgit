@@ -60,20 +60,8 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-05: the 2.30 minimum is enforced on the settings and bundled
   sources too, though §5 attaches it only to PATH (CLAUDE.md makes 2.30 the
   overall minimum). Confirm it in the same ADR.
-- From P0-05: `ResolveOptions::from_env` reads this process's `PATH`. On
-  macOS the caller must overwrite `search_path` with the login-shell PATH.
-  Owner: P0-07.
-- From P0-05: the Xcode-stub check compares paths exactly and does not
-  resolve symlinks, so `/usr/bin/git` reached through a symlink is not
-  recognised as the stub. Owner: P0-07.
 - From P0-05: `bundled_git_path()` is always `None`. Shipping a bundled git
   (§9) has no plan task yet. Add one to the packaging work.
-- From P0-05 and P0-06: `git_binary::run()` still spawns with synchronous
-  `std::process` instead of going through `git_engine::process`, so
-  `git --version` and `xcode-select -p` have no timeout. Since P0-17 these
-  probes also skip the shared limiter and the git spawn counter. Needs a sync
-  entry point on `ProcessCommand`, or async binary resolution. Owner: P0-07
-  (it touches the same spawn path).
 - From P0-06: `ProcessCommand` cannot write to the child's stdin. Needed to
   feed patches to `git apply` and for the credential protocol. Owner: P1-04.
 - From P0-06: an inherited `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_WORK_TREE` (the

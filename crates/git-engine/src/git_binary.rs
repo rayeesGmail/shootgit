@@ -13,11 +13,24 @@
 //!
 //! On every tier Apple's `/usr/bin/git` is refused when the Xcode Command
 //! Line Tools are missing (`xcode-select -p` fails): that binary is only a
-//! stub which opens an installer dialog instead of running git.
+//! stub which opens an installer dialog instead of running git. A path that
+//! reaches the stub through symlinks is refused too.
+//!
+//! On macOS the `PATH` searched is the login-shell `PATH` (§5 step 2), which
+//! [`ResolveOptions::from_login_shell_env`] waits for.
+//!
+//! The probes (`git --version`, `xcode-select -p`) spawn through
+//! `git_engine::process` like every other process, so resolution is async:
+//! each probe has a timeout, and `git --version` takes a slot from the shared
+//! limiter and counts as a git spawn.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::login_shell;
+use crate::process::{self, ProcessCommand, ProcessError};
 
 /// The oldest git the engine supports (CLAUDE.md, §5).
 pub const MIN_GIT_VERSION: GitVersion = GitVersion::new(2, 30, 0);
@@ -100,11 +113,13 @@ pub enum GitBinaryError {
     NotExecutable { path: PathBuf },
     #[error("{path:?} is Apple's git stub and the Xcode Command Line Tools are not installed")]
     XcodeStub { path: PathBuf },
+    /// `git --version` could not be started, or ran past
+    /// [`VERSION_PROBE_TIMEOUT`] and was killed.
     #[error("could not run {path:?} --version")]
     Spawn {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: ProcessError,
     },
     #[error("{path:?} --version failed: {stderr}")]
     VersionFailed { path: PathBuf, stderr: String },
@@ -138,23 +153,46 @@ pub struct ResolveOptions {
 }
 
 impl ResolveOptions {
-    /// Options for the running process.
+    /// Options for the running process, without spawning anything.
     ///
-    /// `search_path` is this process's `PATH`. On macOS a GUI app does not
-    /// inherit the login-shell `PATH` (§5 step 2); once P0-07 resolves it,
-    /// the caller should overwrite `search_path` with that value.
+    /// `search_path` is the login-shell `PATH` once
+    /// [`login_shell::init`](crate::login_shell::init) has recorded it (macOS),
+    /// and this process's `PATH` otherwise. A macOS GUI app does not inherit
+    /// the login-shell `PATH` (§5 step 2), so the app uses
+    /// [`from_login_shell_env`](Self::from_login_shell_env), which waits for
+    /// that value first.
     pub fn from_env(settings_path: Option<PathBuf>) -> Self {
         Self {
             settings_path,
-            search_path: std::env::var_os("PATH"),
+            search_path: process::login_shell_path()
+                .map(OsStr::to_os_string)
+                .or_else(|| std::env::var_os("PATH")),
             bundled_path: bundled_git_path(),
             apple_stub_path: cfg!(target_os = "macos").then(|| PathBuf::from(APPLE_STUB_PATH)),
         }
+    }
+
+    /// [`from_env`](Self::from_env) after the login-shell `PATH` has been
+    /// resolved (at most once per process, macOS only; see
+    /// [`login_shell::init`](crate::login_shell::init)). This is what the app
+    /// resolves git with.
+    pub async fn from_login_shell_env(settings_path: Option<PathBuf>) -> Self {
+        login_shell::init().await;
+        Self::from_env(settings_path)
     }
 }
 
 /// Where Apple's `git` shim lives; without the Xcode CLT it is only a stub.
 const APPLE_STUB_PATH: &str = "/usr/bin/git";
+
+/// Absolute so a `PATH` entry cannot shadow it.
+const XCODE_SELECT_PATH: &str = "/usr/bin/xcode-select";
+
+/// How long `git --version` may take before the candidate is skipped.
+pub const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `xcode-select -p` may take before the CLT count as missing.
+pub const XCODE_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(windows)]
 const GIT_EXE: &str = "git.exe";
@@ -172,28 +210,49 @@ pub fn bundled_git_path() -> Option<PathBuf> {
 }
 
 /// Resolves the git executable to use.
-pub fn resolve(options: &ResolveOptions) -> Result<GitBinary, GitBinaryError> {
-    resolve_with(options, &SystemProbe)
+///
+/// Async because every probe is a spawn through `git_engine::process`:
+/// `git --version` takes a slot from the shared [`Limiter`](process::Limiter)
+/// and counts in [`git_spawn_count`](process::git_spawn_count), and both
+/// probes have a timeout.
+pub async fn resolve(options: &ResolveOptions) -> Result<GitBinary, GitBinaryError> {
+    resolve_with(options, &SystemProbe::default()).await
 }
 
 /// The side effects resolution needs, injectable so tests can fake them.
 trait Probe {
     /// Runs `<git> --version` and returns its stdout.
-    fn version_output(&self, git: &Path) -> Result<String, GitBinaryError>;
+    async fn version_output(&self, git: &Path) -> Result<String, GitBinaryError>;
     /// Whether `xcode-select -p` succeeds.
-    fn xcode_clt_installed(&self) -> bool;
+    async fn xcode_clt_installed(&self) -> bool;
 }
 
-/// The real probe, spawning processes.
-struct SystemProbe;
+/// The real probe, spawning processes through `git_engine::process`.
+struct SystemProbe {
+    xcode_select: PathBuf,
+    version_timeout: Duration,
+    xcode_timeout: Duration,
+}
+
+impl Default for SystemProbe {
+    fn default() -> Self {
+        Self {
+            xcode_select: PathBuf::from(XCODE_SELECT_PATH),
+            version_timeout: VERSION_PROBE_TIMEOUT,
+            xcode_timeout: XCODE_SELECT_TIMEOUT,
+        }
+    }
+}
 
 impl Probe for SystemProbe {
-    fn version_output(&self, git: &Path) -> Result<String, GitBinaryError> {
-        let output = run(git, &["--version"]).map_err(|source| GitBinaryError::Spawn {
-            path: git.to_path_buf(),
-            source,
-        })?;
-        if !output.status.success() {
+    async fn version_output(&self, git: &Path) -> Result<String, GitBinaryError> {
+        let output = process::probe_git(git, &["--version"], self.version_timeout)
+            .await
+            .map_err(|source| GitBinaryError::Spawn {
+                path: git.to_path_buf(),
+                source,
+            })?;
+        if !output.success() {
             return Err(GitBinaryError::VersionFailed {
                 path: git.to_path_buf(),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -202,11 +261,14 @@ impl Probe for SystemProbe {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn xcode_clt_installed(&self) -> bool {
-        // Absolute path so a `PATH` entry cannot shadow it. Failing to spawn
-        // counts as "not installed": then the stub is skipped, which is safe.
-        match run(Path::new("/usr/bin/xcode-select"), &["-p"]) {
-            Ok(output) => output.status.success(),
+    async fn xcode_clt_installed(&self) -> bool {
+        // Not git, so no limiter slot. Failing to run, or running past the
+        // timeout, counts as "not installed": then the stub is skipped,
+        // which is safe.
+        let mut command = ProcessCommand::new(&self.xcode_select);
+        command.arg("-p").timeout(Some(self.xcode_timeout));
+        match command.output().await {
+            Ok(output) => output.success(),
             Err(error) => {
                 tracing::debug!(%error, "xcode-select -p could not run");
                 false
@@ -215,24 +277,10 @@ impl Probe for SystemProbe {
     }
 }
 
-/// The only place this module spawns a process.
-///
-/// Bootstrap: `git_engine::process` (P0-06) does not exist yet. Once it does,
-/// route this through its generic builder so the spawn gets the shared
-/// limiter and a timeout.
-fn run(program: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
-    let mut command = std::process::Command::new(program);
-    command.args(args).stdin(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command.output()
-}
-
-fn resolve_with(options: &ResolveOptions, probe: &dyn Probe) -> Result<GitBinary, GitBinaryError> {
+async fn resolve_with<P: Probe>(
+    options: &ResolveOptions,
+    probe: &P,
+) -> Result<GitBinary, GitBinaryError> {
     let mut resolver = Resolver {
         options,
         probe,
@@ -240,7 +288,7 @@ fn resolve_with(options: &ResolveOptions, probe: &dyn Probe) -> Result<GitBinary
     };
 
     if let Some(path) = &options.settings_path {
-        return resolver.check(path, GitSource::Settings);
+        return resolver.check(path, GitSource::Settings).await;
     }
 
     let mut rejected = Vec::new();
@@ -259,7 +307,7 @@ fn resolve_with(options: &ResolveOptions, probe: &dyn Probe) -> Result<GitBinary
             continue;
         }
         seen.push(candidate.clone());
-        match resolver.check(&candidate, GitSource::Path) {
+        match resolver.check(&candidate, GitSource::Path).await {
             Ok(found) => return Ok(found),
             Err(reason) => {
                 tracing::debug!(path = ?candidate, %reason, "skipping git on PATH");
@@ -273,7 +321,7 @@ fn resolve_with(options: &ResolveOptions, probe: &dyn Probe) -> Result<GitBinary
     }
 
     if let Some(bundled) = &options.bundled_path {
-        match resolver.check(bundled, GitSource::Bundled) {
+        match resolver.check(bundled, GitSource::Bundled).await {
             Ok(found) => return Ok(found),
             Err(reason) => rejected.push(RejectedCandidate {
                 path: bundled.clone(),
@@ -286,30 +334,30 @@ fn resolve_with(options: &ResolveOptions, probe: &dyn Probe) -> Result<GitBinary
     Err(GitBinaryError::NotFound { rejected })
 }
 
-struct Resolver<'a> {
+struct Resolver<'a, P> {
     options: &'a ResolveOptions,
-    probe: &'a dyn Probe,
+    probe: &'a P,
     /// `xcode-select -p` runs at most once per resolution, and only if the
     /// Apple stub is actually a candidate.
     clt_installed: Option<bool>,
 }
 
-impl Resolver<'_> {
+impl<P: Probe> Resolver<'_, P> {
     /// Accepts `path` if it is an executable git ≥ [`MIN_GIT_VERSION`] and not
     /// Apple's stub on a machine without the Xcode CLT.
-    fn check(&mut self, path: &Path, source: GitSource) -> Result<GitBinary, GitBinaryError> {
+    async fn check(&mut self, path: &Path, source: GitSource) -> Result<GitBinary, GitBinaryError> {
         if !is_executable_file(path) {
             return Err(GitBinaryError::NotExecutable {
                 path: path.to_path_buf(),
             });
         }
-        if self.options.apple_stub_path.as_deref() == Some(path) && !self.clt_installed() {
+        if self.is_apple_stub(path) && !self.clt_installed().await {
             // Never run it: the stub opens the CLT installer dialog.
             return Err(GitBinaryError::XcodeStub {
                 path: path.to_path_buf(),
             });
         }
-        let version = GitVersion::parse(&self.probe.version_output(path)?)?;
+        let version = GitVersion::parse(&self.probe.version_output(path).await?)?;
         if version < MIN_GIT_VERSION {
             return Err(GitBinaryError::TooOld {
                 path: path.to_path_buf(),
@@ -324,11 +372,29 @@ impl Resolver<'_> {
         })
     }
 
-    fn clt_installed(&mut self) -> bool {
-        let probe = self.probe;
-        *self
-            .clt_installed
-            .get_or_insert_with(|| probe.xcode_clt_installed())
+    /// Whether `path` is Apple's stub, directly or through symlinks
+    /// (`/usr/local/bin/git -> /usr/bin/git`). Both sides are canonicalised,
+    /// so a symlinked stub location matches too.
+    fn is_apple_stub(&self, path: &Path) -> bool {
+        let Some(stub) = self.options.apple_stub_path.as_deref() else {
+            return false;
+        };
+        if path == stub {
+            return true;
+        }
+        match (std::fs::canonicalize(path), std::fs::canonicalize(stub)) {
+            (Ok(real), Ok(real_stub)) => real == real_stub,
+            _ => false,
+        }
+    }
+
+    async fn clt_installed(&mut self) -> bool {
+        if let Some(known) = self.clt_installed {
+            return known;
+        }
+        let installed = self.probe.xcode_clt_installed().await;
+        self.clt_installed = Some(installed);
+        installed
     }
 }
 
@@ -352,7 +418,16 @@ mod tests {
     use std::collections::HashMap;
     use std::env;
     use std::fs;
+    use std::future::Future;
     use tempfile::TempDir;
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
 
     #[cfg(windows)]
     const EXE: &str = "git.exe";
@@ -454,7 +529,7 @@ mod tests {
     }
 
     impl Probe for FakeProbe {
-        fn version_output(&self, git: &Path) -> Result<String, GitBinaryError> {
+        async fn version_output(&self, git: &Path) -> Result<String, GitBinaryError> {
             self.version_calls.borrow_mut().push(git.to_path_buf());
             self.versions
                 .get(git)
@@ -465,7 +540,7 @@ mod tests {
                 })
         }
 
-        fn xcode_clt_installed(&self) -> bool {
+        async fn xcode_clt_installed(&self) -> bool {
             self.xcode_calls.set(self.xcode_calls.get() + 1);
             self.clt_installed
         }
@@ -504,7 +579,7 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve_with(&options, &probe).unwrap();
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(
             found,
@@ -530,7 +605,7 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve_with(&options, &probe).unwrap();
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(found.path, git_new);
         assert_eq!(found.version, v(2, 30, 0));
@@ -547,7 +622,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_with(&options, &probe).unwrap_err();
+        let err = block_on(resolve_with(&options, &probe)).unwrap_err();
 
         let GitBinaryError::NotFound { rejected } = err else {
             panic!("expected NotFound, got {err:?}");
@@ -576,7 +651,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(resolve_with(&options, &probe).unwrap().path, git_good);
+        assert_eq!(
+            block_on(resolve_with(&options, &probe)).unwrap().path,
+            git_good
+        );
     }
 
     #[test]
@@ -587,7 +665,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_with(&options, &FakeProbe::default()).unwrap_err();
+        let err = block_on(resolve_with(&options, &FakeProbe::default())).unwrap_err();
 
         assert!(matches!(err, GitBinaryError::NotFound { ref rejected } if rejected.is_empty()));
     }
@@ -606,7 +684,7 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve_with(&options, &probe).unwrap();
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(found.path, git_configured);
         assert_eq!(found.source, GitSource::Settings);
@@ -627,14 +705,14 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_with(&options, &probe).unwrap_err();
+        let err = block_on(resolve_with(&options, &probe)).unwrap_err();
         assert!(
             matches!(err, GitBinaryError::TooOld { ref path, .. } if *path == git_configured),
             "{err:?}"
         );
 
         options.settings_path = Some(configured.path().join("missing-git"));
-        let err = resolve_with(&options, &probe).unwrap_err();
+        let err = block_on(resolve_with(&options, &probe)).unwrap_err();
         assert!(
             matches!(err, GitBinaryError::NotExecutable { .. }),
             "{err:?}"
@@ -642,7 +720,7 @@ mod tests {
 
         // A directory is not an executable file either.
         options.settings_path = Some(configured.path().to_path_buf());
-        let err = resolve_with(&options, &probe).unwrap_err();
+        let err = block_on(resolve_with(&options, &probe)).unwrap_err();
         assert!(
             matches!(err, GitBinaryError::NotExecutable { .. }),
             "{err:?}"
@@ -672,7 +750,7 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve_with(&options, &probe).unwrap();
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(found.path, git_good);
         assert_eq!(*probe.version_calls.borrow(), vec![git_good]);
@@ -688,7 +766,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = resolve_with(&options, &probe).unwrap_err();
+        let _ = block_on(resolve_with(&options, &probe)).unwrap_err();
 
         assert_eq!(probe.version_calls.borrow().len(), 1);
     }
@@ -709,7 +787,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(resolve_with(&options, &probe).unwrap().path, git_good);
+        assert_eq!(
+            block_on(resolve_with(&options, &probe)).unwrap().path,
+            git_good
+        );
     }
 
     #[test]
@@ -723,7 +804,7 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve_with(&options, &probe).unwrap();
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(found.path, git_bundled);
         assert_eq!(found.source, GitSource::Bundled);
@@ -744,7 +825,7 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_with(&options, &probe).unwrap().source,
+            block_on(resolve_with(&options, &probe)).unwrap().source,
             GitSource::Path
         );
     }
@@ -757,7 +838,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_with(&options, &FakeProbe::default()).unwrap_err();
+        let err = block_on(resolve_with(&options, &FakeProbe::default())).unwrap_err();
 
         let GitBinaryError::NotFound { rejected } = err else {
             panic!("expected NotFound, got {err:?}");
@@ -794,11 +875,38 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve_with(&options, &probe).unwrap();
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(found.path, git_brew);
         // Running the stub would pop the CLT installer, so it must never run.
         assert!(!probe.version_calls.borrow().contains(&stub));
+        assert_eq!(probe.xcode_calls.get(), 1);
+    }
+
+    /// `/usr/local/bin/git -> /usr/bin/git` is still Apple's stub.
+    #[cfg(unix)]
+    #[test]
+    fn apple_stub_reached_through_a_symlink_is_skipped_without_xcode_clt() {
+        let [usr_bin, linked, brew] = dirs();
+        let stub = fake_git(usr_bin.path());
+        let link = linked.path().join(EXE);
+        std::os::unix::fs::symlink(&stub, &link).unwrap();
+        let git_brew = fake_git(brew.path());
+        let probe = FakeProbe::default()
+            .with(&link, "2.39.5 (Apple Git-154)")
+            .with(&stub, "2.39.5 (Apple Git-154)")
+            .with(&git_brew, "2.46.0");
+        let options = ResolveOptions {
+            search_path: search_path(&[linked.path(), brew.path()]),
+            apple_stub_path: Some(stub.clone()),
+            ..Default::default()
+        };
+
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
+
+        assert_eq!(found.path, git_brew);
+        // Neither the link nor the stub behind it may run.
+        assert!(probe.version_calls.borrow().iter().all(|p| *p == git_brew));
         assert_eq!(probe.xcode_calls.get(), 1);
     }
 
@@ -813,7 +921,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_with(&options, &probe).unwrap_err();
+        let err = block_on(resolve_with(&options, &probe)).unwrap_err();
 
         let GitBinaryError::NotFound { rejected } = err else {
             panic!("expected NotFound, got {err:?}");
@@ -840,7 +948,7 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve_with(&options, &probe).unwrap();
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(found.path, stub);
         assert_eq!(found.version, v(2, 39, 5));
@@ -857,7 +965,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_with(&options, &probe).unwrap_err();
+        let err = block_on(resolve_with(&options, &probe)).unwrap_err();
 
         assert!(matches!(err, GitBinaryError::XcodeStub { .. }), "{err:?}");
         assert!(probe.version_calls.borrow().is_empty());
@@ -874,7 +982,7 @@ mod tests {
             ..Default::default()
         };
 
-        resolve_with(&options, &probe).unwrap();
+        block_on(resolve_with(&options, &probe)).unwrap();
 
         assert_eq!(probe.xcode_calls.get(), 0);
     }
@@ -887,7 +995,10 @@ mod tests {
             options.settings_path,
             Some(PathBuf::from("/opt/git/bin/git"))
         );
-        assert_eq!(options.search_path, env::var_os("PATH"));
+        let expected = crate::process::login_shell_path()
+            .map(std::ffi::OsStr::to_os_string)
+            .or_else(|| env::var_os("PATH"));
+        assert_eq!(options.search_path, expected);
         assert_eq!(options.bundled_path, bundled_git_path());
         if cfg!(target_os = "macos") {
             assert_eq!(options.apple_stub_path, Some(PathBuf::from("/usr/bin/git")));
@@ -932,12 +1043,12 @@ mod tests {
             ..Default::default()
         };
 
-        let found = resolve(&options).unwrap();
+        let found = block_on(resolve(&options)).unwrap();
 
         assert_eq!(found.path, git_good);
         assert_eq!(found.version, v(2, 45, 2));
 
-        let err = SystemProbe.version_output(&failing_git).unwrap_err();
+        let err = block_on(SystemProbe::default().version_output(&failing_git)).unwrap_err();
         assert!(
             matches!(err, GitBinaryError::VersionFailed { ref stderr, .. } if stderr.contains("boom")),
             "{err:?}"
@@ -954,7 +1065,7 @@ mod tests {
         let fake = dir.path().join("fake-git.cmd");
         fs::write(&fake, "@echo git version 2.45.1.windows.1\r\n").unwrap();
 
-        let output = SystemProbe.version_output(&fake).unwrap();
+        let output = block_on(SystemProbe::default().version_output(&fake)).unwrap();
 
         assert_eq!(GitVersion::parse(&output).unwrap(), v(2, 45, 1));
     }
@@ -963,8 +1074,7 @@ mod tests {
     fn system_probe_reports_spawn_failure() {
         let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let [dir] = dirs();
-        let err = SystemProbe
-            .version_output(&dir.path().join("no-such-git"))
+        let err = block_on(SystemProbe::default().version_output(&dir.path().join("no-such-git")))
             .unwrap_err();
         assert!(matches!(err, GitBinaryError::Spawn { .. }), "{err:?}");
     }
@@ -974,9 +1084,144 @@ mod tests {
     #[test]
     fn resolves_the_machine_git() {
         let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let found = resolve(&ResolveOptions::from_env(None)).unwrap();
+        let found = block_on(resolve(&ResolveOptions::from_env(None))).unwrap();
         assert_eq!(found.source, GitSource::Path);
         assert!(found.version >= MIN_GIT_VERSION);
         assert!(found.path.is_absolute());
+    }
+
+    /// The app resolves on the shared runtime, so the future must be `Send`.
+    #[test]
+    fn resolve_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let options = ResolveOptions::default();
+        let future = resolve(&options);
+        assert_send(&future);
+    }
+
+    // ---- probes go through git_engine::process ------------------------------
+
+    /// Writes an executable shell script at `dir/name`.
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_counts_as_one_git_spawn_and_returns_its_slot() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let [dir] = dirs();
+        let git = script_git(dir.path(), "git version 2.45.2");
+        let git_before = crate::process::git_spawn_count();
+        let total_before = crate::process::spawn_count();
+        let peak_before = crate::process::Limiter::shared().peak_in_flight();
+
+        let output = block_on(SystemProbe::default().version_output(&git)).unwrap();
+
+        assert_eq!(GitVersion::parse(&output).unwrap(), v(2, 45, 2));
+        assert_eq!(crate::process::git_spawn_count(), git_before + 1);
+        assert_eq!(crate::process::spawn_count(), total_before + 1);
+        assert!(crate::process::Limiter::shared().peak_in_flight() >= peak_before.max(1));
+        assert_eq!(crate::process::Limiter::shared().in_flight(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_passes_no_extra_git_flags() {
+        // `--no-optional-locks` would make a git older than 2.15 fail before
+        // printing its version, so the probe runs `git --version` verbatim.
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let [dir] = dirs();
+        let git = script(
+            dir.path(),
+            "git",
+            "printf 'git version 2.44.0 %s\\n' \"$*\"",
+        );
+
+        let output = block_on(SystemProbe::default().version_output(&git)).unwrap();
+
+        assert_eq!(output.trim(), "git version 2.44.0 --version");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hanging_version_probe_times_out_and_the_candidate_is_skipped() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let [hang, good] = dirs();
+        let hanging = script(hang.path(), "git", "exec sleep 10");
+        let git_good = script_git(good.path(), "git version 2.45.2");
+        let probe = SystemProbe {
+            version_timeout: Duration::from_millis(300),
+            ..SystemProbe::default()
+        };
+
+        let started = std::time::Instant::now();
+        let err = block_on(probe.version_output(&hanging)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GitBinaryError::Spawn {
+                    source: ProcessError::Timeout { .. },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let options = ResolveOptions {
+            search_path: search_path(&[hang.path(), good.path()]),
+            ..Default::default()
+        };
+        let found = block_on(resolve_with(&options, &probe)).unwrap();
+        assert_eq!(found.path, git_good);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xcode_select_probe_reads_the_exit_status_and_times_out() {
+        let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let [dir] = dirs();
+        let probe_for = |body: &str, name: &str| SystemProbe {
+            xcode_select: script(dir.path(), name, body),
+            xcode_timeout: Duration::from_millis(300),
+            ..SystemProbe::default()
+        };
+        let git_before = crate::process::git_spawn_count();
+        let total_before = crate::process::spawn_count();
+
+        assert!(block_on(
+            probe_for("echo /Library/Developer/CommandLineTools", "ok").xcode_clt_installed()
+        ));
+        assert!(!block_on(
+            probe_for("echo 'xcode-select: error' >&2; exit 2", "missing").xcode_clt_installed()
+        ));
+        let started = std::time::Instant::now();
+        assert!(!block_on(
+            probe_for("exec sleep 10", "hang").xcode_clt_installed()
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let absent = SystemProbe {
+            xcode_select: dir.path().join("no-such-xcode-select"),
+            ..SystemProbe::default()
+        };
+        assert!(!block_on(absent.xcode_clt_installed()));
+
+        // Spawned through git_engine::process, but not counted as git.
+        assert_eq!(crate::process::spawn_count(), total_before + 3);
+        assert_eq!(crate::process::git_spawn_count(), git_before);
     }
 }
