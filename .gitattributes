@@ -7,3 +7,7 @@ packages/ipc-types/bindings.ts text eol=lf
 # Golden files are compared byte for byte; a CRLF checkout on Windows must
 # not change them. (P0-15 adds the general rule for tests/golden/.)
 crates/*/tests/golden/** text eol=lf
+# Fixture scripts run under bash on every OS, and bash (Git Bash on Windows
+# included) fails on the CR a CRLF checkout adds to each line. (P0-15 adds the
+# general rule for fixture inputs.)
+scripts/fixtures/** text eol=lf

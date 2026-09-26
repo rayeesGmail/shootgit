@@ -13,7 +13,7 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 - [x] **P0-06** `git_engine::process::GitCommand`: builder over `tokio::process`, always passes `--no-optional-locks -c core.quotepath=off`, sets `CREATE_NO_WINDOW` on Windows, `GIT_TERMINAL_PROMPT=0`, timeout, captures stdout/stderr as bytes, `-z` split helper. Tests: timeout fires; NUL split handles empty fields; exit code mapping to `GitError`. Reserve env-injection points for `GIT_ASKPASS`/`SSH_ASKPASS` and a per-spawn `-c` list (used by P1-25 and P4-13). Build it on a generic process builder in the same module (`CREATE_NO_WINDOW`, login-shell PATH, timeout, byte capture) that non-git tools reuse (`ssh`, `ssh-add`, `ssh-keygen` in P1-25, P1-26, P4-27). · model: opus
 - [x] **P0-17** Low-resource runtime and limiter (§4 Low-resource operation): build one tokio runtime sized `max(1, available_parallelism() - 1)` worker threads and hand it to Tauri via `tauri::async_runtime::set(runtime.handle().clone())` before `tauri::Builder::default()` so the app has a single runtime; `GitCommand` goes through a shared concurrency limiter (semaphore of 2 when available_parallelism() ≤ 4, else 4) with two priority lanes (visible-view work before background work); every read accepts a `CancellationToken` and stops promptly when cancelled; `perf/` harness (`crates/perf-harness` or `scripts/perf/`) records RSS, git spawn count and wall time per named operation to JSON. Tests: limiter never exceeds its cap under 50 concurrent requests; high-priority request completes before queued low-priority ones; cancelled read returns within 50 ms. · model: best
 - [x] **P0-07** macOS login-shell environment: resolve `PATH` once via the user's shell (`$SHELL -ilc 'echo $PATH'`) with a 2 s timeout and fallback; used by `GitCommand`. Test on macOS runner. · model: opus
-- [ ] **P0-08** `git_engine::status`: run `git status --porcelain=v2 -z --branch --untracked-files=all` and parse into `RepoInfo` + `Vec<StatusEntry>` (ordinary, renamed/copied, unmerged, untracked, ignored). Fixture script `scripts/fixtures/basic.sh` creates a repo with each entry kind. Tests for all kinds incl. rename with spaces and unicode path. · model: opus
+- [x] **P0-08** `git_engine::status`: run `git status --porcelain=v2 -z --branch --untracked-files=all` and parse into `RepoInfo` + `Vec<StatusEntry>` (ordinary, renamed/copied, unmerged, untracked, ignored). Fixture script `scripts/fixtures/basic.sh` creates a repo with each entry kind. Tests for all kinds incl. rename with spaces and unicode path. · model: opus
 - [ ] **P0-09** `RepoActor`: tokio task per repo owning `Repo` handle, mailbox for commands, serialises writes, concurrent reads. `open_repo(path)` discovers `.git` (incl. worktree `.git` file). Test: two concurrent reads, one write, ordering preserved. · model: opus
 - [ ] **P0-10** File watcher: `notify` recursive watch on worktree + `.git` (HEAD, index, refs/, packed-refs, *_HEAD, rebase-merge/, rebase-apply/, logs/), respects `.gitignore` via `ignore` crate, coalesces into `RepoChanged { kinds }` after 150 ms (250 ms Windows). Own-write suppression via generation counter. Tests: touch file → one event; edit `.git/HEAD` → `kinds` contains `head`. · model: best
 - [ ] **P0-11** Settings store: `settings.json` in Tauri `app_config_dir`, typed `Settings` struct, recent repos list (max 20), git binary override, atomic write. Tests: round-trip, corrupt file recovers to defaults. · model: opus
@@ -36,10 +36,12 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 Gaps found while reviewing finished tasks. Each one names the task that should
 close it. When that task starts, move the item into its scope and delete it here.
 
-- From P0-02: `.gitattributes` protects only `bindings.ts`. Windows runners
-  check files out as CRLF, which will break the byte-exact fixture and golden
-  patch tests. Add `-text` or `eol` rules for `tests/golden/` and the fixture
-  inputs. Owner: P0-15, and it must land before P0-08 and P1-01.
+- From P0-02: `.gitattributes` has only narrow rules: `bindings.ts`,
+  `crates/*/tests/golden/**` (P0-17) and `scripts/fixtures/**` (P0-08).
+  Windows runners check files out as CRLF, which will break the byte-exact
+  fixture and golden patch tests. Add the general `-text` or `eol` rules for
+  golden files and fixture inputs. Owner: P0-15, and it must land before
+  P1-01.
 - From P0-02: Dependabot, `cargo audit` and `npm audit` (spec "Dependency
   audit") have no plan task. Add one.
 - From P0-02: the workflows are not linted. Run `actionlint` on `ci.yml`
@@ -111,3 +113,33 @@ close it. When that task starts, move the item into its scope and delete it here
   timeout; a tmux server started that way survives the kill). An unset or
   relative `$SHELL` also falls back; the shell is not read from `getpwuid`.
   Revisit if users report git not being found. Owner: unassigned.
+- From P0-08: the status models (`Status`, `RepoInfo`, `Head`,
+  `StatusEntry`, `FileStatus`) have no serde or specta derives. P0-12 needs
+  both and P0-13 needs `Serialize`. Paths are `PathBuf` holding git's raw
+  bytes on Unix, and serde fails on a path that is not UTF-8; decide how such
+  paths cross IPC. Owner: P0-12.
+- From P0-08: `RepoInfo` lacks the §5 fields `id` (Owner: P0-09 or P0-12)
+  and `state` (Owner: P2-11, from the markers in `.git`).
+- From P0-08: `status` always runs in the visible lane of the git limiter.
+  A repo that is not active must refresh in the background lane (§4
+  Low-resource operation). Add a priority option when that first happens.
+  Owner: unassigned.
+- From P0-08: status output is held in memory and parsed on an async worker
+  in one pass. Check it against the < 300 ms warm budget on the 50k-file
+  fixture. Owner: P1-12.
+- From P0-08: the `fixture()` helper lives in `tests/status.rs`. Move it to a
+  shared test-support module when a second test file builds fixtures.
+  Owner: P1-01.
+- From P0-08: the fixture test runs `bash` from `PATH`. CI uses Git Bash on
+  Windows, but a local run from PowerShell without Git's `usr\bin` on `PATH`
+  may get WSL's `bash.exe` or none. Document it in `CONTRIBUTING.md`.
+  Owner: P0-15.
+- From P0-08: two P0-05 tests with 300 ms probe timeouts
+  (`hanging_version_probe_times_out_and_the_candidate_is_skipped`,
+  `xcode_select_probe_reads_the_exit_status_and_times_out`) failed once under
+  a loaded full-workspace run on macOS and passed on rerun. Loosen their
+  timing before they flake in CI. Owner: unassigned.
+- From P0-08: `RUSTDOCFLAGS="-D warnings" cargo doc -p git-engine --no-deps`
+  fails on two redundant explicit link targets (`git_binary.rs:159`, `:177`).
+  CI does not run rustdoc. Fix them and add a doc check. Owner: P0-15, or any
+  later CI change.
