@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+default-run = "app"
 
 [lib]
 # The binary stays a thin wrapper around this library so the startup path can be
