@@ -1235,6 +1235,10 @@ name = "git-engine-cli"
 version = "0.0.0"
 dependencies = [
  "git-engine",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
