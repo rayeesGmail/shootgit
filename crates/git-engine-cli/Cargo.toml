@@ -8,6 +8,15 @@ publish.workspace = true
 
 [dependencies]
 git-engine.workspace = true
+# Every command prints the engine's serde models as JSON.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Names the runtime `git_engine::runtime::build` returns. The runtime itself
+# is the engine's, sized as the app's is (ADR 0004).
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

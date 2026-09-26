@@ -18,7 +18,7 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 - [x] **P0-10** File watcher: `notify` recursive watch on worktree + `.git` (HEAD, index, refs/, packed-refs, *_HEAD, rebase-merge/, rebase-apply/, logs/), respects `.gitignore` via `ignore` crate, coalesces into `RepoChanged { kinds }` after 150 ms (250 ms Windows). Own-write suppression via generation counter. Tests: touch file → one event; edit `.git/HEAD` → `kinds` contains `head`. · model: best
 - [x] **P0-11** Settings store: `settings.json` in Tauri `app_config_dir`, typed `Settings` struct, recent repos list (max 20), git binary override, atomic write. Tests: round-trip, corrupt file recovers to defaults. · model: opus
 - [x] **P0-12** Tauri commands `open_repo`, `list_recent_repos`, `get_status`; events `repo-changed`. UI: minimal window with "Open repository" (native dialog) and a raw list of status entries that refreshes on `repo-changed`. Typed events need three things P0-04 left out on purpose: tauri-specta's `derive` feature (for the `Event` macro), `.events(collect_events![..])` on `ipc::builder`, and `builder.mount_events(app)` in `run()`'s `setup` — without the last one the frontend never receives events. Replaces the `ping` status line in `App.tsx` with real repository state. · model: opus
-- [ ] **P0-13** `git-engine-cli`: `status <path>` and `watch <path>` subcommands printing JSON, for manual testing. · model: opus
+- [x] **P0-13** `git-engine-cli`: `status <path>` and `watch <path>` subcommands printing JSON, for manual testing. · model: opus
 - [ ] **P0-18** Constrained-VM perf gate: `scripts/fixtures/large-synthetic.sh` generates a repo with 100k files and 200k commits via `git fast-import` in under 2 min and caches it in CI; `scripts/perf/smoke.sh` uses `git-engine-cli` to open the repo, run status, watch for one external touch, and shut down, emitting the harness JSON; CI job `perf-constrained` runs it inside a 4 GB / 2 vCPU cgroup (Docker `--memory 4g --cpus 2` on ubuntu runner), compares to `perf/baseline.json`; peak RSS and git spawn count fail on > 10 % regression; wall time is the median of 3 runs and fails on > 25 %; when no baseline exists the job passes, uploads the generated `baseline.json` as a workflow artifact and emits a warning annotation. Definition of done: run the job once via `workflow_dispatch`, download the artifact, commit it as `perf/baseline.json` with a `perf: seed baseline` commit, and re-run to confirm the gate compares rather than seeds. Baseline changes only via explicit `perf: update baseline` commits. · model: opus
 - [ ] **P0-14** Release workflow skeleton `release.yml` (tag `v*`, build matrix for 5 targets, artifacts uploaded, signing steps present but skipped when secrets are absent). Dry run on a `v0.0.1-test` tag. · model: opus
 - [ ] **P0-15** Repo hygiene: `.editorconfig`, `rustfmt.toml`, `.prettierrc`, `LICENSE-THIRD-PARTY` generation via `cargo about` + `license-checker` (stub), `CONTRIBUTING.md` pointing at CLAUDE.md. Exclude `packages/ipc-types/bindings.ts` from both Prettier (`.prettierignore`) and `.editorconfig`'s `trim_trailing_whitespace`: specta writes tabs and a trailing blank line, so any reformat makes the committed file differ from a fresh export and breaks the P0-04 freshness check (ADR 0003). · model: sonnet
@@ -116,22 +116,14 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-08: status output is held in memory and parsed on an async worker
   in one pass. Check it against the < 300 ms warm budget on the 50k-file
   fixture. Owner: P1-12.
-- From P0-08: the `fixture()` helper lives in `tests/status.rs`. Move it to a
-  shared test-support module when a second test file builds fixtures.
-  Owner: P1-01.
+- From P0-08: the `fixture()` helper is copied in
+  `crates/git-engine/tests/status.rs` and, since P0-13,
+  `crates/git-engine-cli/tests/cli.rs`. Move it to a shared test-support
+  crate both can use as a dev-dependency. Owner: P1-01.
 - From P0-08: the fixture test runs `bash` from `PATH`. CI uses Git Bash on
   Windows, but a local run from PowerShell without Git's `usr\bin` on `PATH`
   may get WSL's `bash.exe` or none. Document it in `CONTRIBUTING.md`.
   Owner: P0-15.
-- From P0-08: two P0-05 tests with 300 ms probe timeouts
-  (`hanging_version_probe_times_out_and_the_candidate_is_skipped`,
-  `xcode_select_probe_reads_the_exit_status_and_times_out`) failed once under
-  a loaded full-workspace run on macOS and passed on rerun. P0-10's review saw
-  them fail again in an unloaded serial `cargo test --workspace` (the lib
-  binary now also runs 23 watcher unit tests), then pass three times in a
-  row. During P0-12 they failed in 2 of 5 full-workspace runs on macOS, so
-  they will flake the PR matrix. Loosen their timing before they flake in
-  CI. Owner: unassigned; take it before P0-13.
 - From P0-08: `RUSTDOCFLAGS="-D warnings" cargo doc -p git-engine --no-deps`
   fails on two redundant explicit link targets (`git_binary.rs:159`, `:177`).
   CI does not run rustdoc. Fix them and add a doc check. Owner: P0-15, or any
@@ -198,11 +190,24 @@ close it. When that task starts, move the item into its scope and delete it here
   Route every other git command the same way. Owner: P1-10.
 - From P0-12: `tauri-plugin-dialog` pulls in `tauri-plugin-fs` and `rfd`.
   Measure what they add against the 25 MB download budget. Owner: P0-14.
-- From P0-12: the app installs no `tracing` subscriber, so its warnings
-  (watcher failures, settings that could not be saved) go nowhere.
-  Owner: unassigned.
+- From P0-12: the app (and, since P0-13, `git-engine-cli`) installs no
+  `tracing` subscriber, so their warnings (watcher failures, settings that
+  could not be saved) go nowhere. The CLI would need `tracing-subscriber`,
+  which is not a workspace dependency. Owner: unassigned.
 - From P0-12: `SettingsStore::update` holds its mutex while it fsyncs, so
   `SettingsStore::get` (called on every `open_repo`) can wait on a save.
   Owner: unassigned.
 - From P0-12: repository discovery and saving the recent list now run on
   tokio's blocking pool too. Relevant to the P0-17 blocking-pool item.
+- From P0-13: `git-engine-cli watch` stops only when Ctrl+C kills it, and
+  nothing is cancelled. git children run in their own process group
+  (P0-06), so a `git status` in flight when `status` is interrupted
+  finishes on its own. P0-18's smoke needs a clean stop: a signal handler
+  that cancels, or an "exit after N events" option. The `watching <root>`
+  line on stderr is the readiness signal. Owner: P0-18.
+- From P0-13: `git-engine-cli` resolves git from `PATH` only
+  (`ResolveOptions::from_env`). It ignores `Settings::git_path` and has no
+  `--git` option. Owner: unassigned.
+- From P0-13: `describe()` in `crates/git-engine-cli/src/lib.rs` repeats
+  `with_causes` in `src-tauri/src/commands/error.rs`. Share one copy from
+  `git-engine` if a third caller appears. Owner: unassigned.
