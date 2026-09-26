@@ -5,6 +5,7 @@ pub mod git_binary;
 pub mod login_shell;
 pub mod process;
 pub mod repo;
+pub mod repo_actor;
 pub mod runtime;
 pub mod status;
 

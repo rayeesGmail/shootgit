@@ -1,5 +1,7 @@
 //! The engine's error type.
 
+use std::path::PathBuf;
+
 use crate::git_binary::GitBinaryError;
 use crate::process::ProcessError;
 
@@ -40,6 +42,31 @@ pub enum GitError {
         command: &'static str,
         reason: String,
     },
+    /// [`open_repo`](crate::repo::open_repo) found no repository: neither
+    /// `path` nor any directory above it has a `.git` that is one.
+    #[error("not a git repository: {}", path.display())]
+    NotARepository { path: PathBuf },
+    /// [`open_repo`](crate::repo::open_repo) was given a path in a bare
+    /// repository or inside a repository's git directory, neither of which
+    /// has a working tree.
+    #[error("{} has no working tree: it is in a bare repository or a git directory", path.display())]
+    NoWorkTree { path: PathBuf },
+    /// A `.git` file (linked worktrees and submodules have one) that does not
+    /// point at a repository. Git stops here rather than look further up,
+    /// and so does [`open_repo`](crate::repo::open_repo).
+    #[error("invalid .git file {}: {reason}", path.display())]
+    InvalidGitFile { path: PathBuf, reason: String },
+    /// A file-system operation on `path` failed.
+    #[error("could not access {}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A [`RepoActor`](crate::repo_actor::RepoActor) operation ended without
+    /// a result: it panicked, or the runtime shut down before it finished.
+    #[error("the repository operation was aborted before it finished")]
+    Aborted,
 }
 
 fn describe_exit(code: Option<i32>) -> String {

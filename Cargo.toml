@@ -29,6 +29,10 @@ tokio = "1.53.1"
 tokio-util = "0.7.19"
 tracing = "0.1.44"
 
+# Canonical paths without Windows' `\\?\` prefix where the plain form works
+# (git_engine::repo::open_repo). Already in Cargo.lock through tauri.
+dunce = "1.0.5"
+
 # Platform FFI for killing a spawned process tree (git_engine::process).
 # Both versions are already in Cargo.lock through tokio.
 libc = "0.2.189"
