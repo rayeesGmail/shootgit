@@ -116,9 +116,10 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-08: status output is held in memory and parsed on an async worker
   in one pass. Check it against the < 300 ms warm budget on the 50k-file
   fixture. Owner: P1-12.
-- From P0-08: the `fixture()` helper lives in `tests/status.rs`. Move it to a
-  shared test-support module when a second test file builds fixtures.
-  Owner: P1-01.
+- From P0-08: the `fixture()` helper is copied in
+  `crates/git-engine/tests/status.rs` and, since P0-13,
+  `crates/git-engine-cli/tests/cli.rs`. Move it to a shared test-support
+  crate both can use as a dev-dependency. Owner: P1-01.
 - From P0-08: the fixture test runs `bash` from `PATH`. CI uses Git Bash on
   Windows, but a local run from PowerShell without Git's `usr\bin` on `PATH`
   may get WSL's `bash.exe` or none. Document it in `CONTRIBUTING.md`.
@@ -189,11 +190,24 @@ close it. When that task starts, move the item into its scope and delete it here
   Route every other git command the same way. Owner: P1-10.
 - From P0-12: `tauri-plugin-dialog` pulls in `tauri-plugin-fs` and `rfd`.
   Measure what they add against the 25 MB download budget. Owner: P0-14.
-- From P0-12: the app installs no `tracing` subscriber, so its warnings
-  (watcher failures, settings that could not be saved) go nowhere.
-  Owner: unassigned.
+- From P0-12: the app (and, since P0-13, `git-engine-cli`) installs no
+  `tracing` subscriber, so their warnings (watcher failures, settings that
+  could not be saved) go nowhere. The CLI would need `tracing-subscriber`,
+  which is not a workspace dependency. Owner: unassigned.
 - From P0-12: `SettingsStore::update` holds its mutex while it fsyncs, so
   `SettingsStore::get` (called on every `open_repo`) can wait on a save.
   Owner: unassigned.
 - From P0-12: repository discovery and saving the recent list now run on
   tokio's blocking pool too. Relevant to the P0-17 blocking-pool item.
+- From P0-13: `git-engine-cli watch` stops only when Ctrl+C kills it, and
+  nothing is cancelled. git children run in their own process group
+  (P0-06), so a `git status` in flight when `status` is interrupted
+  finishes on its own. P0-18's smoke needs a clean stop: a signal handler
+  that cancels, or an "exit after N events" option. The `watching <root>`
+  line on stderr is the readiness signal. Owner: P0-18.
+- From P0-13: `git-engine-cli` resolves git from `PATH` only
+  (`ResolveOptions::from_env`). It ignores `Settings::git_path` and has no
+  `--git` option. Owner: unassigned.
+- From P0-13: `describe()` in `crates/git-engine-cli/src/lib.rs` repeats
+  `with_causes` in `src-tauri/src/commands/error.rs`. Share one copy from
+  `git-engine` if a third caller appears. Owner: unassigned.
