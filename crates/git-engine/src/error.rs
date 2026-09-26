@@ -32,6 +32,14 @@ pub enum GitError {
     /// normally drop the error rather than show it.
     #[error("cancelled")]
     Cancelled,
+    /// git succeeded but printed something that does not have the documented
+    /// machine-readable shape. `command` is the git subcommand, `reason` what
+    /// was wrong with its output.
+    #[error("unexpected output from `git {command}`: {reason}")]
+    UnexpectedOutput {
+        command: &'static str,
+        reason: String,
+    },
 }
 
 fn describe_exit(code: Option<i32>) -> String {

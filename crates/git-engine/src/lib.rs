@@ -4,7 +4,9 @@ pub mod error;
 pub mod git_binary;
 pub mod login_shell;
 pub mod process;
+pub mod repo;
 pub mod runtime;
+pub mod status;
 
 #[cfg(test)]
 pub(crate) mod test_support {
