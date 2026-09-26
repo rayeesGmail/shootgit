@@ -15,7 +15,7 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 - [x] **P0-07** macOS login-shell environment: resolve `PATH` once via the user's shell (`$SHELL -ilc 'echo $PATH'`) with a 2 s timeout and fallback; used by `GitCommand`. Test on macOS runner. · model: opus
 - [x] **P0-08** `git_engine::status`: run `git status --porcelain=v2 -z --branch --untracked-files=all` and parse into `RepoInfo` + `Vec<StatusEntry>` (ordinary, renamed/copied, unmerged, untracked, ignored). Fixture script `scripts/fixtures/basic.sh` creates a repo with each entry kind. Tests for all kinds incl. rename with spaces and unicode path. · model: opus
 - [x] **P0-09** `RepoActor`: tokio task per repo owning `Repo` handle, mailbox for commands, serialises writes, concurrent reads. `open_repo(path)` discovers `.git` (incl. worktree `.git` file). Test: two concurrent reads, one write, ordering preserved. · model: opus
-- [ ] **P0-10** File watcher: `notify` recursive watch on worktree + `.git` (HEAD, index, refs/, packed-refs, *_HEAD, rebase-merge/, rebase-apply/, logs/), respects `.gitignore` via `ignore` crate, coalesces into `RepoChanged { kinds }` after 150 ms (250 ms Windows). Own-write suppression via generation counter. Tests: touch file → one event; edit `.git/HEAD` → `kinds` contains `head`. · model: best
+- [x] **P0-10** File watcher: `notify` recursive watch on worktree + `.git` (HEAD, index, refs/, packed-refs, *_HEAD, rebase-merge/, rebase-apply/, logs/), respects `.gitignore` via `ignore` crate, coalesces into `RepoChanged { kinds }` after 150 ms (250 ms Windows). Own-write suppression via generation counter. Tests: touch file → one event; edit `.git/HEAD` → `kinds` contains `head`. · model: best
 - [ ] **P0-11** Settings store: `settings.json` in Tauri `app_config_dir`, typed `Settings` struct, recent repos list (max 20), git binary override, atomic write. Tests: round-trip, corrupt file recovers to defaults. · model: opus
 - [ ] **P0-12** Tauri commands `open_repo`, `list_recent_repos`, `get_status`; events `repo-changed`. UI: minimal window with "Open repository" (native dialog) and a raw list of status entries that refreshes on `repo-changed`. Typed events need three things P0-04 left out on purpose: tauri-specta's `derive` feature (for the `Event` macro), `.events(collect_events![..])` on `ipc::builder`, and `builder.mount_events(app)` in `run()`'s `setup` — without the last one the frontend never receives events. Replaces the `ping` status line in `App.tsx` with real repository state. · model: opus
 - [ ] **P0-13** `git-engine-cli`: `status <path>` and `watch <path>` subcommands printing JSON, for manual testing. · model: opus
@@ -134,8 +134,10 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-08: two P0-05 tests with 300 ms probe timeouts
   (`hanging_version_probe_times_out_and_the_candidate_is_skipped`,
   `xcode_select_probe_reads_the_exit_status_and_times_out`) failed once under
-  a loaded full-workspace run on macOS and passed on rerun. Loosen their
-  timing before they flake in CI. Owner: unassigned.
+  a loaded full-workspace run on macOS and passed on rerun. P0-10's review saw
+  them fail again in an unloaded serial `cargo test --workspace` (the lib
+  binary now also runs 23 watcher unit tests), then pass three times in a
+  row. Loosen their timing before they flake in CI. Owner: unassigned.
 - From P0-08: `RUSTDOCFLAGS="-D warnings" cargo doc -p git-engine --no-deps`
   fails on two redundant explicit link targets (`git_binary.rs:159`, `:177`).
   CI does not run rustdoc. Fix them and add a doc check. Owner: P0-15, or any
@@ -153,10 +155,37 @@ close it. When that task starts, move the item into its scope and delete it here
   and small reads, so it can block an async worker on a network drive.
   Decide in P0-12 whether to call it through `spawn_blocking` (see the P0-17
   blocking-pool item). Owner: P0-12.
-- From P0-09: the actor awaits a running write without polling anything
-  else, so a watcher event that arrives mid-write must be buffered outside
-  the actor loop, not dropped. Owner: P0-10.
 - From P0-09: a write holds back every read submitted after it. Once
   `fetch`/`pull`/`push` exist, a long network write would freeze status and
   diffs. Decide whether network phases run outside the actor, with only the
   ref update serialised. Owner: P1-09.
+- From P0-10: §4 says the `RepoActor` "owns the watcher", but
+  `git_engine::watcher::Watcher` is a standalone handle beside the actor.
+  Compose them per repository (the actor holds the `Watcher`, and every
+  engine write takes `begin_write()` and keeps the guard through the
+  post-write status snapshot, §5 rule 2), or record the split with `/adr`.
+  `RepoChanged` also needs serde and specta derives. Owner: P0-12.
+- From P0-10: no polling fallback (§5 rule 8) and no handling of a repo
+  moved or deleted (§5 rule 9). A failed watcher ends its stream with
+  `WatchError::Stopped`; `is_watch_limit()` names the inotify case. Nothing
+  restarts or polls yet. Owner: P0-12 for surfacing the error; the polling
+  fallback needs a plan task.
+- From P0-10: on Linux, notify's recursive mode registers inotify watches
+  inside ignored directories too, so a large `node_modules/` or `target/` can
+  exhaust `max_user_watches`. A walker-driven per-directory watch that skips
+  ignored dirs would fix it. Owner: unassigned (Linux-verified task).
+- From P0-10: `RepoChanged` carries kinds only. §5 row 1 "re-run status for
+  changed paths only" needs a bounded list of changed paths. Owner: P1-12.
+- From P0-10: files that are tracked but match `.gitignore` (force-added)
+  are dropped by the ignore filter, so their working-tree edits produce no
+  event; only index changes are reported. Owner: unassigned.
+- From P0-10: `DEFAULT_LOCK_HOLD` (2 s) and the event channel capacity (16)
+  are not in the spec. Confirm them with the `DEFAULT_TIMEOUT` item above.
+  Global excludes are read at start and on rule reload, not watched.
+- From P0-10: the watcher starts its OS watch on tokio's blocking pool
+  (`spawn_blocking`), the first user of it. Relevant to the P0-17
+  blocking-pool item.
+- From P0-10: notify's Windows backend uses a 16 KB ReadDirectoryChangesW
+  buffer and may not signal a rescan on overflow, so a large burst could be
+  lost. Late FSEvents deliveries after an `OwnWrite` guard drops cost one
+  extra refresh. Measure both in the P0-18 smoke. Owner: P0-18.

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::git_binary::GitBinaryError;
 use crate::process::ProcessError;
+use crate::watcher::WatchError;
 
 /// Every fallible public operation in `git-engine` returns this.
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +68,10 @@ pub enum GitError {
     /// a result: it panicked, or the runtime shut down before it finished.
     #[error("the repository operation was aborted before it finished")]
     Aborted,
+    /// The repository [`Watcher`](crate::watcher::Watcher) could not be
+    /// started.
+    #[error(transparent)]
+    Watch(#[from] WatchError),
 }
 
 fn describe_exit(code: Option<i32>) -> String {

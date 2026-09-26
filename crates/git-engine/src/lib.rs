@@ -8,6 +8,7 @@ pub mod repo;
 pub mod repo_actor;
 pub mod runtime;
 pub mod status;
+pub mod watcher;
 
 #[cfg(test)]
 pub(crate) mod test_support {

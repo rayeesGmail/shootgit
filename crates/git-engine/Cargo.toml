@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 dunce = { workspace = true }
+ignore = { workspace = true }
+notify = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "io-util",
