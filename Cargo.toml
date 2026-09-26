@@ -33,6 +33,12 @@ tracing = "0.1.44"
 # (git_engine::repo::open_repo). Already in Cargo.lock through tauri.
 dunce = "1.0.5"
 
+# File watching for the repository watcher (git_engine::watcher, SPEC §5
+# External change sync): FSEvents on macOS, ReadDirectoryChangesW on Windows,
+# inotify on Linux. `ignore` matches event paths against `.gitignore`.
+notify = "8.2.0"
+ignore = "0.4.33"
+
 # Platform FFI for killing a spawned process tree (git_engine::process).
 # Both versions are already in Cargo.lock through tokio.
 libc = "0.2.189"
