@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core (plugin) permissions the main window needs. The app's own commands, registered in src-tauri/src/ipc.rs, are not listed here: Tauri gates them through the ACL only once the app ships its own permissions manifest, which it does not. Add a permission here when a core or third-party plugin is introduced.",
+  "description": "Core and plugin permissions the main window needs. The app's own commands, registered in src-tauri/src/ipc.rs, are not listed here: Tauri gates them through the ACL only once the app ships its own permissions manifest, which it does not. Add a permission here when a core or third-party plugin is introduced, and grant only the commands the frontend calls: of the dialog plugin, only the folder picker behind \"Open repository\" (dialog:allow-open).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

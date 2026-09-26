@@ -17,7 +17,7 @@ Goal: an app that opens a repo and shows raw `git status` output on all 3 OSes, 
 - [x] **P0-09** `RepoActor`: tokio task per repo owning `Repo` handle, mailbox for commands, serialises writes, concurrent reads. `open_repo(path)` discovers `.git` (incl. worktree `.git` file). Test: two concurrent reads, one write, ordering preserved. · model: opus
 - [x] **P0-10** File watcher: `notify` recursive watch on worktree + `.git` (HEAD, index, refs/, packed-refs, *_HEAD, rebase-merge/, rebase-apply/, logs/), respects `.gitignore` via `ignore` crate, coalesces into `RepoChanged { kinds }` after 150 ms (250 ms Windows). Own-write suppression via generation counter. Tests: touch file → one event; edit `.git/HEAD` → `kinds` contains `head`. · model: best
 - [x] **P0-11** Settings store: `settings.json` in Tauri `app_config_dir`, typed `Settings` struct, recent repos list (max 20), git binary override, atomic write. Tests: round-trip, corrupt file recovers to defaults. · model: opus
-- [ ] **P0-12** Tauri commands `open_repo`, `list_recent_repos`, `get_status`; events `repo-changed`. UI: minimal window with "Open repository" (native dialog) and a raw list of status entries that refreshes on `repo-changed`. Typed events need three things P0-04 left out on purpose: tauri-specta's `derive` feature (for the `Event` macro), `.events(collect_events![..])` on `ipc::builder`, and `builder.mount_events(app)` in `run()`'s `setup` — without the last one the frontend never receives events. Replaces the `ping` status line in `App.tsx` with real repository state. · model: opus
+- [x] **P0-12** Tauri commands `open_repo`, `list_recent_repos`, `get_status`; events `repo-changed`. UI: minimal window with "Open repository" (native dialog) and a raw list of status entries that refreshes on `repo-changed`. Typed events need three things P0-04 left out on purpose: tauri-specta's `derive` feature (for the `Event` macro), `.events(collect_events![..])` on `ipc::builder`, and `builder.mount_events(app)` in `run()`'s `setup` — without the last one the frontend never receives events. Replaces the `ping` status line in `App.tsx` with real repository state. · model: opus
 - [ ] **P0-13** `git-engine-cli`: `status <path>` and `watch <path>` subcommands printing JSON, for manual testing. · model: opus
 - [ ] **P0-18** Constrained-VM perf gate: `scripts/fixtures/large-synthetic.sh` generates a repo with 100k files and 200k commits via `git fast-import` in under 2 min and caches it in CI; `scripts/perf/smoke.sh` uses `git-engine-cli` to open the repo, run status, watch for one external touch, and shut down, emitting the harness JSON; CI job `perf-constrained` runs it inside a 4 GB / 2 vCPU cgroup (Docker `--memory 4g --cpus 2` on ubuntu runner), compares to `perf/baseline.json`; peak RSS and git spawn count fail on > 10 % regression; wall time is the median of 3 runs and fails on > 25 %; when no baseline exists the job passes, uploads the generated `baseline.json` as a workflow artifact and emits a warning annotation. Definition of done: run the job once via `workflow_dispatch`, download the artifact, commit it as `perf/baseline.json` with a `perf: seed baseline` commit, and re-run to confirm the gate compares rather than seeds. Baseline changes only via explicit `perf: update baseline` commits. · model: opus
 - [ ] **P0-14** Release workflow skeleton `release.yml` (tag `v*`, build matrix for 5 targets, artifacts uploaded, signing steps present but skipped when secrets are absent). Dry run on a `v0.0.1-test` tag. · model: opus
@@ -109,14 +109,6 @@ close it. When that task starts, move the item into its scope and delete it here
   timeout; a tmux server started that way survives the kill). An unset or
   relative `$SHELL` also falls back; the shell is not read from `getpwuid`.
   Revisit if users report git not being found. Owner: unassigned.
-- From P0-08: the status models (`Status`, `RepoInfo`, `Head`,
-  `StatusEntry`, `FileStatus`) have no serde or specta derives. P0-12 needs
-  both and P0-13 needs `Serialize`. Paths are `PathBuf` holding git's raw
-  bytes on Unix, and serde fails on a path that is not UTF-8; decide how such
-  paths cross IPC. Owner: P0-12.
-- From P0-08: `RepoInfo` lacks the §5 fields `id` (Owner: P0-12, which owns
-  the open-repo registry and IPC ids) and `state` (Owner: P2-11, from the
-  markers in `.git`).
 - From P0-08: `status` always runs in the visible lane of the git limiter.
   A repo that is not active must refresh in the background lane (§4
   Low-resource operation). Add a priority option when that first happens.
@@ -137,7 +129,9 @@ close it. When that task starts, move the item into its scope and delete it here
   a loaded full-workspace run on macOS and passed on rerun. P0-10's review saw
   them fail again in an unloaded serial `cargo test --workspace` (the lib
   binary now also runs 23 watcher unit tests), then pass three times in a
-  row. Loosen their timing before they flake in CI. Owner: unassigned.
+  row. During P0-12 they failed in 2 of 5 full-workspace runs on macOS, so
+  they will flake the PR matrix. Loosen their timing before they flake in
+  CI. Owner: unassigned; take it before P0-13.
 - From P0-08: `RUSTDOCFLAGS="-D warnings" cargo doc -p git-engine --no-deps`
   fails on two redundant explicit link targets (`git_binary.rs:159`, `:177`).
   CI does not run rustdoc. Fix them and add a doc check. Owner: P0-15, or any
@@ -145,31 +139,10 @@ close it. When that task starts, move the item into its scope and delete it here
 - From P0-09: ADR 0007 (clear inherited repository-local git variables on
   every spawn) has no row in the spec's §12 Decisions log. Add it in the
   Claude Doc and re-export; never hand-edit `SPEC.md`.
-- From P0-09: `open_repo` does not honour `GIT_CEILING_DIRECTORIES`, git's
-  stop at file-system boundaries, `core.worktree` (bare dotfiles repos) or
-  `safe.directory`. A repository owned by another user opens, and every git
-  call then fails with "dubious ownership". Surface that error with the fix
-  (`git config --global --add safe.directory`, which the app must not run
-  itself). Owner: P0-12; the rest unassigned.
-- From P0-09: `open_repo` is synchronous and walks the tree with `stat` calls
-  and small reads, so it can block an async worker on a network drive.
-  Decide in P0-12 whether to call it through `spawn_blocking` (see the P0-17
-  blocking-pool item). Owner: P0-12.
 - From P0-09: a write holds back every read submitted after it. Once
   `fetch`/`pull`/`push` exist, a long network write would freeze status and
   diffs. Decide whether network phases run outside the actor, with only the
   ref update serialised. Owner: P1-09.
-- From P0-10: §4 says the `RepoActor` "owns the watcher", but
-  `git_engine::watcher::Watcher` is a standalone handle beside the actor.
-  Compose them per repository (the actor holds the `Watcher`, and every
-  engine write takes `begin_write()` and keeps the guard through the
-  post-write status snapshot, §5 rule 2), or record the split with `/adr`.
-  `RepoChanged` also needs serde and specta derives. Owner: P0-12.
-- From P0-10: no polling fallback (§5 rule 8) and no handling of a repo
-  moved or deleted (§5 rule 9). A failed watcher ends its stream with
-  `WatchError::Stopped`; `is_watch_limit()` names the inotify case. Nothing
-  restarts or polls yet. Owner: P0-12 for surfacing the error; the polling
-  fallback needs a plan task.
 - From P0-10: on Linux, notify's recursive mode registers inotify watches
   inside ignored directories too, so a large `node_modules/` or `target/` can
   exhaust `max_user_watches`. A walker-driven per-directory watch that skips
@@ -189,19 +162,6 @@ close it. When that task starts, move the item into its scope and delete it here
   buffer and may not signal a rescan on overflow, so a large burst could be
   lost. Late FSEvents deliveries after an `OwnWrite` guard drops cost one
   extra refresh. Measure both in the P0-18 smoke. Owner: P0-18.
-- From P0-11: `SettingsStore::update` and `settings::save` block and fsync.
-  Tauri runs sync commands on the main thread, so `open_repo` (which records
-  a recent repo) and any command that writes settings must be async and call
-  them through `spawn_blocking` (see the P0-17 blocking-pool item). Owner:
-  P0-12.
-- From P0-11: `Settings::git_path` is not yet passed to
-  `ResolveOptions::from_login_shell_env` when the app resolves git. A path
-  that is not UTF-8 cannot be saved (serde_json fails), so such a repo cannot
-  be recorded as recent; decide it with the P0-08 non-UTF-8 IPC item.
-  Owner: P0-12.
-- From P0-11: `run()` fails startup when `app_config_dir` cannot be
-  determined, while a missing or corrupt file only falls back to defaults.
-  Decide whether that case should run on in-memory defaults. Owner: P0-12.
 - From P0-11: the file format (a JSON object with no schema version; unknown
   fields are ignored and then dropped on the next save, so a downgrade loses
   newer settings) and the corrupt-file rule (moved to
@@ -215,3 +175,34 @@ close it. When that task starts, move the item into its scope and delete it here
   regular file on save. On Windows the rename has no retry when antivirus or
   the indexer holds the file open, so a transient failure returns
   `SettingsError::Write`. Owner: unassigned (Windows-verified task).
+- From P0-12 (what P0-09's `safe.directory` item left unassigned):
+  `open_repo` still ignores `GIT_CEILING_DIRECTORIES`, git's stop at
+  file-system boundaries (`GIT_DISCOVERY_ACROSS_FILESYSTEM`) and
+  `core.worktree` (bare dotfiles repos). Owner: unassigned.
+- From P0-12 (what P0-10's watcher-failure item left open): a failed watcher
+  is now surfaced (`repo-watch-failed`, and `watch_error` in `open_repo`'s
+  answer), and the window offers Refresh, but nothing polls (§5 rule 8) and
+  nothing handles a repository moved or deleted while open (§5 rule 9).
+  Needs a plan task.
+- From P0-12: ADR 0008 (repository ids and lossy paths across IPC) and
+  ADR 0009 (recognise git's `safe.directory` refusal from its stderr) are
+  "proposed" and have no rows in the spec's §12 Decisions log. Add them in
+  the Claude Doc and re-export; never hand-edit `SPEC.md`.
+- From P0-12: paths cross IPC as lossy strings (ADR 0008), so a file whose
+  path is not UTF-8 can be shown but not named back to Rust, and a
+  repository whose own path is not UTF-8 cannot be opened from the dialog.
+  The first commands that take a path from the frontend need a lossless
+  form. Owner: P1-04.
+- From P0-12: only `status` recognises git's ownership refusal
+  (`Repo::classified_git_command` with `LC_ALL=C`, then `classify_failure`).
+  Route every other git command the same way. Owner: P1-10.
+- From P0-12: `tauri-plugin-dialog` pulls in `tauri-plugin-fs` and `rfd`.
+  Measure what they add against the 25 MB download budget. Owner: P0-14.
+- From P0-12: the app installs no `tracing` subscriber, so its warnings
+  (watcher failures, settings that could not be saved) go nowhere.
+  Owner: unassigned.
+- From P0-12: `SettingsStore::update` holds its mutex while it fsyncs, so
+  `SettingsStore::get` (called on every `open_repo`) can wait on a save.
+  Owner: unassigned.
+- From P0-12: repository discovery and saving the recent list now run on
+  tokio's blocking pool too. Relevant to the P0-17 blocking-pool item.

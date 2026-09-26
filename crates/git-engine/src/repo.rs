@@ -2,12 +2,61 @@
 //! Conventions), and [`open_repo`], which finds the repository that contains
 //! a path.
 
+use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::GitError;
 use crate::process::GitCommand;
+
+/// Names one repository handle for as long as the process runs: the `id` of
+/// SPEC §5 `RepoInfo`, and how the app's IPC commands and the
+/// `repo-changed` event address an open repository (ADR 0008).
+///
+/// Every [`Repo`] gets a new id when it is created ([`Repo::new`],
+/// [`open_repo`]); its clones share it. Ids are never reused within a
+/// process and mean nothing in another one, so they must not be persisted:
+/// the path is what identifies a repository across launches. The same
+/// working tree opened twice gets two ids, so a caller that keeps one handle
+/// per repository (the app does) must look the path up before opening it
+/// again.
+///
+/// On the wire it is a plain number.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, specta::Type,
+)]
+#[serde(transparent)]
+pub struct RepoId(u32);
+
+impl RepoId {
+    /// A new id, different from every id handed out before in this process.
+    ///
+    /// Four billion repository handles per run is out of reach; if it ever
+    /// wrapped, a stale id could name a newer handle, which the app would
+    /// still check against its registry.
+    fn next() -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+impl RepoId {
+    /// A fixed id for unit tests that build models by hand.
+    pub(crate) const fn for_tests(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
+impl fmt::Display for RepoId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// One repository: the git executable that operates on it, the root of its
 /// working tree, and where its git data lives.
@@ -17,8 +66,11 @@ use crate::process::GitCommand;
 /// `index` and any in-progress merge or rebase, and shares everything else
 /// (objects, refs, `packed-refs`, config) through the common directory. In
 /// every other working tree the two are the same directory.
+///
+/// Each handle has its own [`RepoId`]; clones share it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
+    id: RepoId,
     git: PathBuf,
     workdir: PathBuf,
     git_dir: PathBuf,
@@ -37,11 +89,17 @@ impl Repo {
         let workdir = workdir.into();
         let git_dir = workdir.join(".git");
         Self {
+            id: RepoId::next(),
             git: git.into(),
             common_dir: git_dir.clone(),
             git_dir,
             workdir,
         }
+    }
+
+    /// This handle's id, shared by its clones.
+    pub fn id(&self) -> RepoId {
+        self.id
     }
 
     /// The git executable.
@@ -72,6 +130,63 @@ impl Repo {
         let mut git = GitCommand::new(&self.git);
         git.current_dir(&self.workdir);
         git
+    }
+
+    /// [`git_command`](Self::git_command) for a spawn whose failure goes
+    /// through [`classify_failure`]: git's messages come out in English
+    /// whatever the user's locale, so they can be recognised (ADR 0009).
+    ///
+    /// `LC_ALL=C` changes only the language of git's messages here: the
+    /// machine-readable `-z` output these spawns parse is locale-independent
+    /// bytes, and with the C locale gettext ignores `LANGUAGE` too.
+    pub(crate) fn classified_git_command(&self) -> GitCommand {
+        let mut git = self.git_command();
+        git.env("LC_ALL", "C");
+        git
+    }
+}
+
+/// The command that tells git to trust the working tree at `path` although
+/// another user owns it (`safe.directory`, git-config(1)), quoted for the
+/// user's shell: single quotes on Unix, double quotes and forward slashes on
+/// Windows, where git itself prints the path that way.
+///
+/// It edits the user's global git config, so the app only shows it and never
+/// runs it (CLAUDE.md Safety rules).
+pub fn safe_directory_command(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let quoted = if cfg!(windows) {
+        format!("\"{}\"", path.replace('\\', "/"))
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    };
+    format!("git config --global --add safe.directory {quoted}")
+}
+
+/// Recognises git's refusal to work in a repository owned by another user
+/// and turns it into [`GitError::DubiousOwnership`]; every other error is
+/// returned unchanged.
+///
+/// The refusal is exit code 128 with a message that is the only sign of it
+/// (git has no machine-readable form), so this is one of the few places
+/// that read git's stderr, from a spawn made with
+/// [`Repo::classified_git_command`] so the text is English (ADR 0009). Git
+/// 2.35.3 and later say "detected dubious ownership"; the CVE-2022-24765
+/// backports down to 2.30.3 say "unsafe repository".
+pub(crate) fn classify_failure(repo: &Repo, error: GitError) -> GitError {
+    match error {
+        GitError::Failed {
+            exit_code: Some(128),
+            ref stderr,
+            ..
+        } if stderr.contains("detected dubious ownership")
+            || stderr.contains("unsafe repository") =>
+        {
+            GitError::DubiousOwnership {
+                path: repo.workdir.clone(),
+            }
+        }
+        other => other,
     }
 }
 
@@ -104,11 +219,16 @@ impl Repo {
 /// Nothing is taken from the environment: the repository is the one `path`
 /// is in, never one an inherited `GIT_DIR` names, and every git spawn clears
 /// such variables too (ADR 0007). Not honoured yet:
-/// `GIT_CEILING_DIRECTORIES`, git's stop at file-system boundaries,
-/// `core.worktree`, and `safe.directory` (a repository owned by another user
-/// opens here, and git then refuses to work in it).
+/// `GIT_CEILING_DIRECTORIES`, git's stop at file-system boundaries and
+/// `core.worktree`. Ownership (`safe.directory`) is not checked here either:
+/// a repository owned by another user opens, and the first git command run
+/// in it (normally [`status`](crate::status::status)) fails with
+/// [`GitError::DubiousOwnership`], which names the fix.
 ///
 /// Cost: a few `stat` calls and reads of small files per directory walked.
+/// That is blocking file-system work, slow on a network drive, so async
+/// callers run it on the blocking pool (the app does,
+/// `tokio::task::spawn_blocking`).
 pub fn open_repo(git: impl Into<PathBuf>, path: impl AsRef<Path>) -> Result<Repo, GitError> {
     let path = path.as_ref();
     let start = canonical(path)?;
@@ -128,6 +248,7 @@ pub fn open_repo(git: impl Into<PathBuf>, path: impl AsRef<Path>) -> Result<Repo
         if let Some((git_dir, common_dir)) = found {
             tracing::debug!(workdir = ?dir, ?git_dir, "opened repository");
             return Ok(Repo {
+                id: RepoId::next(),
                 git: git.into(),
                 workdir: dir.to_path_buf(),
                 git_dir: canonical(&git_dir)?,
@@ -266,6 +387,82 @@ fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_repository_handle_gets_its_own_id_and_clones_share_it() {
+        let first = Repo::new("git", "/work/a");
+        let second = Repo::new("git", "/work/a");
+        assert_ne!(first.id(), second.id());
+        assert_eq!(first.clone().id(), first.id());
+    }
+
+    #[test]
+    fn a_repository_id_crosses_ipc_as_a_plain_number() {
+        let repo = Repo::new("git", "/work/a");
+        let json = serde_json::to_string(&repo.id()).unwrap();
+        assert_eq!(json, repo.id().to_string());
+        let back: RepoId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, repo.id());
+    }
+
+    #[test]
+    fn the_safe_directory_fix_quotes_the_path_for_a_shell() {
+        if cfg!(windows) {
+            assert_eq!(
+                safe_directory_command(Path::new(r"C:\Users\me\my repo")),
+                r#"git config --global --add safe.directory "C:/Users/me/my repo""#
+            );
+        } else {
+            assert_eq!(
+                safe_directory_command(Path::new("/srv/their repo")),
+                "git config --global --add safe.directory '/srv/their repo'"
+            );
+            assert_eq!(
+                safe_directory_command(Path::new("/srv/it's")),
+                r"git config --global --add safe.directory '/srv/it'\''s'"
+            );
+        }
+    }
+
+    #[test]
+    fn only_gits_ownership_refusal_counts_as_dubious_ownership() {
+        let repo = Repo::new("git", "/srv/theirs");
+        let failed = |exit_code, stderr: &str| GitError::Failed {
+            args: vec!["status".to_owned()],
+            exit_code,
+            stderr: stderr.to_owned(),
+        };
+        // git 2.35.3 and later.
+        let refused = failed(
+            Some(128),
+            "fatal: detected dubious ownership in repository at '/srv/theirs'\n\
+             To add an exception for this directory, call:\n\n\
+             \tgit config --global --add safe.directory /srv/theirs\n",
+        );
+        assert!(matches!(
+            classify_failure(&repo, refused),
+            GitError::DubiousOwnership { ref path } if path == Path::new("/srv/theirs")
+        ));
+        // git 2.30.3 to 2.35.2 (the CVE-2022-24765 backports).
+        let older = failed(
+            Some(128),
+            "fatal: unsafe repository ('/srv/theirs' is owned by someone else)\n",
+        );
+        assert!(matches!(
+            classify_failure(&repo, older),
+            GitError::DubiousOwnership { .. }
+        ));
+        // Anything else is left alone.
+        for other in [
+            failed(Some(128), "fatal: not a git repository\n"),
+            failed(Some(1), "detected dubious ownership"),
+            failed(None, "detected dubious ownership"),
+            GitError::Cancelled,
+        ] {
+            let before = format!("{other:?}");
+            assert_eq!(format!("{:?}", classify_failure(&repo, other)), before);
+        }
+    }
 
     #[test]
     fn line_endings_are_trimmed_but_other_trailing_whitespace_is_kept() {

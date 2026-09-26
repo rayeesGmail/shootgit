@@ -95,3 +95,27 @@ fn the_generated_bindings_say_they_are_generated() {
          so a hand edit is obvious in review; found: {first_line:?}"
     );
 }
+
+#[test]
+fn the_generated_bindings_expose_the_repository_commands_and_events() {
+    let committed = fs::read_to_string(committed_bindings()).unwrap();
+
+    for command in ["open_repo", "get_status", "list_recent_repos"] {
+        assert!(
+            committed.contains(&format!("(\"{command}\"")),
+            "`{command}` must reach TypeScript under its Tauri name"
+        );
+    }
+    // SPEC §4: `repo-changed { repo_id, kinds }`, under exactly that name.
+    assert!(
+        committed.contains("export const events"),
+        "typed events must be exported (P0-12)"
+    );
+    assert!(committed.contains("makeEvent<RepoChanged>(\"repo-changed\")"));
+    let (_, payload) = committed
+        .split_once("export type RepoChanged = ")
+        .expect("the RepoChanged payload type is exported");
+    let payload = &payload[..=payload.find('}').expect("an object type")];
+    assert!(payload.contains("repo_id: RepoId"), "{payload}");
+    assert!(payload.contains("kinds: ChangeKind[]"), "{payload}");
+}

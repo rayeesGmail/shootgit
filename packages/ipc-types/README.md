@@ -20,7 +20,18 @@ what the generator reads.
 Use it from the UI as:
 
 ```ts
-import { commands } from '@shootgit/ipc-types';
+import { commands, events } from '@shootgit/ipc-types';
 
 const answer = await commands.ping(); // "pong"
+
+// Commands that can fail resolve to a result instead of throwing:
+const opened = await commands.openRepo('/work/repo');
+if (opened.status === 'error') console.warn(opened.error.kind, opened.error.message);
+
+// Typed events; `listen` resolves to the function that stops listening.
+const unlisten = await events.repoChanged.listen(({ payload }) => {
+  console.log(payload.repo_id, payload.kinds);
+});
 ```
+
+In the app, only the stores in `packages/ui/src/stores/` call these.

@@ -3,8 +3,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mountApp } from './mount';
 
 // No IPC mock here on purpose: mounting must work with no Tauri host at all,
-// so the `ping` the app fires on mount (P0-04) has to fail quietly rather than
-// take the window down. `App.test.tsx` covers the mocked round-trip.
+// so what the app asks the backend on mount (the recent repositories, the
+// `repo-changed` subscription, P0-12) has to fail quietly rather than take the
+// window down. `App.test.tsx` covers the mocked round-trip.
 
 const ROOT_HTML = '<div id="root"></div>';
 
